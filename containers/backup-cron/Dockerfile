@@ -1,9 +1,9 @@
 FROM debian:12-slim
 
 ARG PUID=1000
-ENV PUID ${PUID}
+ENV PUID=${PUID}
 ARG PGID=1000
-ENV PGID ${PGID}
+ENV PGID=${PGID}
 
 RUN apt-get update -yqq && \
     groupadd -g ${PGID} backup-cron && \

@@ -159,7 +159,7 @@ services:
     depends_on:
       - phpmyadmin-proxy
     restart: unless-stopped
-    image: phpmyadmin/phpmyadmin:latest
+    image: phpmyadmin/phpmyadmin:5.2.3
     environment:
       - PMA_HOST=mariadb
       - PMA_USER=${MARIADB_USER}
@@ -206,7 +206,7 @@ services:
   #############################################
 
   ftp-quests:
-    image: stilliard/pure-ftpd
+    image: stilliard/pure-ftpd:bookworm-1.0.50
     restart: unless-stopped
     environment:
       FTP_USER_UID: 1000

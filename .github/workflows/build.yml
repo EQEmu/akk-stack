@@ -1,0 +1,126 @@
+name: Build Container Images
+
+# Builds all akk-stack container images.
+#
+# Triggers:
+#   - Pull requests: build only (validation, no push)
+#   - Push to main:  build and push to GHCR
+#   - Weekly schedule: full rebuild and push to absorb upstream base
+#     image security patches (decoupled from repo commit velocity)
+#   - Manual dispatch: build with an optional push toggle for testing
+#
+# Images are published to ghcr.io/<repo-owner>/akk-stack/<service>
+# The namespace derives from the repository owner, so this workflow
+# works unchanged in personal mirrors, forks, and the upstream
+# EQEmu/akk-stack repo. No edits required between test and PR.
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'containers/**'
+      - 'docker-compose.yml'
+      - '.github/workflows/build.yml'
+  push:
+    branches: [main, master]
+    paths:
+      - 'containers/**'
+      - 'docker-compose.yml'
+      - '.github/workflows/build.yml'
+  schedule:
+    # Weekly rebuild, Sunday 08:00 UTC
+    - cron: '0 8 * * 0'
+  workflow_dispatch:
+    inputs:
+      push_images:
+        description: 'Push built images to GHCR'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One bad service should not cancel the others; we want the full
+      # failure picture in a single run.
+      fail-fast: false
+      matrix:
+        include:
+          - service: eqemu-server
+            context: ./containers/eqemu-server
+            dockerfile: ./containers/eqemu-server/Dockerfile
+          - service: mariadb
+            context: ./containers/mariadb
+            dockerfile: ./containers/mariadb/Dockerfile
+          - service: http-proxy
+            context: ./containers/http-proxy
+            dockerfile: ./containers/http-proxy/Dockerfile
+          - service: peq-editor
+            context: ./containers/peq-editor
+            dockerfile: ./containers/peq-editor/Dockerfile
+          - service: backup-cron
+            context: ./containers/backup-cron
+            dockerfile: ./containers/backup-cron/Dockerfile
+          - service: fail2ban-server
+            context: ./containers/fail2ban-server
+            dockerfile: ./containers/fail2ban-server/Dockerfile
+          - service: fail2ban-mariadb
+            context: ./containers/fail2ban-mariadb
+            dockerfile: ./containers/fail2ban-mariadb/Dockerfile
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GHCR requires a lowercase namespace and GitHub org/user names
+      # may contain uppercase characters, so normalize once here.
+      - name: Compute image name
+        id: image
+        run: |
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=ghcr.io/${OWNER_LC}/akk-stack/${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether to push
+        id: push
+        run: |
+          PUSH=false
+          if [ "${{ github.event_name }}" = "push" ]; then PUSH=true; fi
+          if [ "${{ github.event_name }}" = "schedule" ]; then PUSH=true; fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.push_images }}" = "true" ]; then PUSH=true; fi
+          echo "push=${PUSH}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.push.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: ${{ steps.push.outputs.push == 'true' }}
+          tags: |
+            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}

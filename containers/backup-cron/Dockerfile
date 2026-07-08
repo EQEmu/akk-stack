@@ -1,4 +1,4 @@
-FROM debian:12-slim
+FROM debian:13-slim
 
 ARG PUID=1000
 ENV PUID=${PUID}

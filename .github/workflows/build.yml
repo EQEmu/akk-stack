@@ -80,7 +80,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # GHCR requires a lowercase namespace and GitHub org/user names
       # may contain uppercase characters, so normalize once here.

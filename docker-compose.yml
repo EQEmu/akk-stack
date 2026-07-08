@@ -75,8 +75,7 @@ services:
     restart: unless-stopped
     build:
       context: ./containers/mariadb
-      args:
-        - INNODB_BUFFER_POOL_SIZE=${INNODB_BUFFER_POOL_SIZE:-256MB}
+    command: --innodb-buffer-pool-size=${INNODB_BUFFER_POOL_SIZE:-256MB}
     ports:
       - ${IP_ADDRESS}:3306:3306
     volumes:
@@ -88,6 +87,7 @@ services:
       - MYSQL_PASSWORD=${MARIADB_PASSWORD}
       - MYSQL_ROOT_PASSWORD=${MARIADB_ROOT_PASSWORD}
       - MYSQL_ALLOW_EMPTY_PASSWORD=NO
+      - MARIADB_AUTO_UPGRADE=1
       - TZ=${TZ:-US/Central}
     networks:
       - backend

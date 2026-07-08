@@ -1,0 +1,45 @@
+# Dependabot keeps container base images and GitHub Actions versions
+# current. Each containers/* directory gets its own docker ecosystem
+# entry because Dependabot scans one directory per entry.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /containers/eqemu-server
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /containers/mariadb
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /containers/http-proxy
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /containers/peq-editor
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /containers/backup-cron
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /containers/fail2ban-server
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /containers/fail2ban-mariadb
+    schedule:
+      interval: weekly

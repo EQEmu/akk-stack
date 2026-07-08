@@ -4,6 +4,18 @@
 
 FROM php:7.1-apache
 
+# Debian Buster was archived after LTS ended; its package repos no
+# longer exist on deb.debian.org or security.debian.org. Point apt at
+# archive.debian.org so the image remains buildable. buster-updates
+# does not exist on the archive and is removed. Check-Valid-Until is
+# disabled because archived Release files are no longer refreshed.
+RUN sed -i \
+	-e 's|http://deb.debian.org/debian|http://archive.debian.org/debian|g' \
+	-e 's|http://security.debian.org/debian-security|http://archive.debian.org/debian-security|g' \
+	/etc/apt/sources.list && \
+	sed -i '/buster-updates/d' /etc/apt/sources.list && \
+	echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99archive
+
 RUN apt-get update && apt-get install -y \
 	libbz2-dev \
 	libc-client-dev \

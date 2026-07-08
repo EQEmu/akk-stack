@@ -1,4 +1,4 @@
-FROM mariadb:10.5.4
+FROM mariadb:12.3.2
 
 LABEL maintainer="Akkadius <akkadius1@gmail.com>"
 COPY my.cnf /etc/mysql/conf.d/my.cnf

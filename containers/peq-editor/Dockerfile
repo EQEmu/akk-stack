@@ -2,7 +2,7 @@
 # 7.1 Apache
 ######################################################
 
-FROM php:7.1-apache
+FROM php:8.5-apache
 
 # Debian Buster was archived after LTS ended; its package repos no
 # longer exist on deb.debian.org or security.debian.org. Point apt at

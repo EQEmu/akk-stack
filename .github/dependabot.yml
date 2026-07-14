@@ -1,6 +1,18 @@
 # Dependabot keeps container base images and GitHub Actions versions
 # current. Each containers/* directory gets its own docker ecosystem
 # entry because Dependabot scans one directory per entry.
+#
+# Major version bumps are ignored for runtime-critical base images
+# (PHP, MariaDB, and the debian build environments) because a green
+# CI build only proves the image assembles, not that the application
+# runs on it. Those migrations are deliberate, tested work:
+# - php: the peq-editor code and extension set (mcrypt was removed
+#   from PHP core in 7.2) need changes before any 8.x base can work
+# - mariadb: the bundled my.cnf must be audited against the target
+#   version and existing deployments need a mariadb-upgrade path
+# - debian (eqemu-server): the entire compile toolchain changes;
+#   requires a full server build and runtime test
+# Minor and patch updates continue to flow for all of these.
 
 version: 2
 updates:
@@ -13,11 +25,17 @@ updates:
     directory: /containers/eqemu-server
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: debian
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker
     directory: /containers/mariadb
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: mariadb
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker
     directory: /containers/http-proxy
@@ -28,11 +46,17 @@ updates:
     directory: /containers/peq-editor
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: php
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker
     directory: /containers/backup-cron
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: debian
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker
     directory: /containers/fail2ban-server

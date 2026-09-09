@@ -1,4 +1,4 @@
-FROM nginx:1.31.4-alpine
+FROM nginx:1.31.5-alpine
 
 # for htpasswd command
 RUN apk add --no-cache --update apache2-utils

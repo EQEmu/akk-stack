@@ -5,6 +5,11 @@ RUN_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
 $(eval $(RUN_ARGS):;@:)
 
 #----------------------
+# ProjectEQ database source
+#----------------------
+PEQ_DB_URL ?= https://db.eqemu.dev/api/v1/dump/latest
+
+#----------------------
 # Silence GNU Make
 #----------------------
 ifndef VERBOSE
@@ -106,8 +111,11 @@ init-directories: ##@init Bootstrap directories
 
 init-peq-database: ##@init Sources fresh PEQ database (Warning: Will over-write existing)
 	@./assets/scripts/banner.pl "Bootstrapping PEQ Database"
-	curl https://gitlab.com/TheGrandLibrary/db.projecteq.net-dumps/-/package_files/232952944/download -o /tmp/db.zip
+	@echo "Downloading PEQ database from [$(PEQ_DB_URL)]"
+	curl -fSL "$(PEQ_DB_URL)" -o /tmp/db.zip
 	unzip -o /tmp/db.zip -d /tmp/db/
+	# Strip the MariaDB 11+ sandbox-mode header, which older mysql clients reject
+	sed -i '/^\/\*M!999999/d' /tmp/db/peq-dump/*.sql
 	cd /tmp/db/peq-dump/ && mysql -u$(shell ~/assets/scripts/init/get-config-var.sh '.server.database.username') \
 		-p$(shell ~/assets/scripts/init/get-config-var.sh '.server.database.password') \
 		-h $(shell ~/assets/scripts/init/get-config-var.sh '.server.database.host') \

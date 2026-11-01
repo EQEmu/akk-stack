@@ -119,7 +119,7 @@ class Jobs(unittest.TestCase):
             state = jobs.read(path / 'state.json')
             wrong = dict(state['runner'], start='wrong')
             jobs.write(path / 'state.json', dict(state, runner=wrong))
-        with self.assertRaisesRegex(ValueError, 'ownership mismatch'): jobs.cancel(path)
+        with self.assertRaisesRegex(ValueError, 'ownership mismatch'): jobs.signal_owned(wrong, signal.SIGINT)
         self.assertFalse((path / 'cancel.json').exists())
         jobs.write(path / 'state.json', state)
         jobs.cancel(path); self.wait(path)
@@ -127,6 +127,22 @@ class Jobs(unittest.TestCase):
             with self.assertRaises(ValueError): jobs.job_path(path.parent, value)
         alias = path.parent / ('b'*32); alias.symlink_to(path, target_is_directory=True)
         with self.assertRaises(ValueError): jobs.job_path(path.parent, alias.name)
+
+    def test_reused_runner_pid_recovers_notification_without_signalling_replacement(self):
+        path = self.start('import time\ntime.sleep(30)\n')
+        state = jobs.read(path / 'state.json')
+        jobs.signal_owned(state['runner'], signal.SIGKILL)
+        deadline = time.monotonic() + 5
+        while jobs.alive(state['runner']) and time.monotonic() < deadline: time.sleep(.02)
+        # Our live test process stands in for an unrelated reused PID with a
+        # different recorded start identity. No signal may be sent to it.
+        replacement = dict(jobs.process_identity(os.getpid()), start='expired-start')
+        jobs.write(path / 'state.json', dict(state, runner=replacement))
+        with patch.object(jobs, 'signal_owned', side_effect=AssertionError('Recovery must not signal')):
+            self.assertEqual(jobs.notify(path)['status'], 'sent')
+        self.assertEqual(jobs.read(path / 'result.json')['status'], 'interrupted')
+        if state.get('validator') and jobs.alive(state['validator']):
+            jobs.stop_owned(state['validator'], grace=.1)
 
     def test_bounded_logs_preserve_exit_and_report_tail(self):
         code, detail = jobs.capture(['/usr/bin/python3', '-c',
@@ -235,6 +251,7 @@ class Jobs(unittest.TestCase):
         value = self.wait(path)
         self.assertEqual(value['result']['status'], 'launch_failed')
         self.assertEqual(value['notification']['status'], 'sent')
+        self.assertEqual(jobs.cancel(path)['result'], value['result'])
 
 
 if __name__ == '__main__': unittest.main()

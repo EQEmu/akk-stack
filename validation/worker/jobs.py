@@ -214,11 +214,6 @@ def recover(path, cancelled=False):
     """A dead supervisor cannot supply an exit code or remote cleanup receipt."""
     if not (path / 'result.json').exists():
         state = read(path / 'state.json')
-        try:
-            if process_identity(state['runner']['pid']) != state['runner']:
-                raise ValueError('Process ownership mismatch; refusing cancellation')
-        except (FileNotFoundError, ProcessLookupError):
-            pass
         if state.get('runner') and alive(state['runner']):
             raise ValueError('Job is still running')
         write(path / 'result.json', dict(status='cancelled' if cancelled else 'interrupted',
@@ -372,7 +367,7 @@ def cancel(path):
     with locked(path / 'state.lock'):
         state = read(path / 'state.json')
         # Verify before recording cancellation; never signal another process.
-        if not alive(state['runner']):
+        if not state.get('runner') or not alive(state['runner']):
             if state.get('validator') and alive(state['validator']):
                 signal_owned(state['validator'], 0)
                 if not state.get('canceller') or not alive(state['canceller']):

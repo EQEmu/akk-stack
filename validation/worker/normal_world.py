@@ -260,6 +260,41 @@ def source_diagnostics(data):
     return result if len(result) > 1 else None
 
 
+def first_sanitizer_diagnostic(data):
+    """Keep the first recognizable diagnostic independently of long stack tails.
+
+    Candidate text is advisory, never a verdict. The outer fixture applies its
+    existing secret scrubber to this field with the rest of the result.
+    """
+    marker = re.search(rb'ERROR: (?:AddressSanitizer|LeakSanitizer|UndefinedBehaviorSanitizer):|'
+                       rb'(?:AddressSanitizer|UndefinedBehaviorSanitizer):DEADLYSIGNAL|runtime error:', data)
+    if marker is None:
+        return None
+    line = data.rfind(b'\n', 0, marker.start()) + 1
+    start = max(line, marker.start() - 200)
+    text = data[start:start + 4096].decode(errors='replace')
+    # Prefix truncation must preserve the diagnostic header, including under
+    # hostile UTF-8/control-character escaping. Tail budgets remain separate.
+    low, high = 0, min(len(text), 1000)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(encoded(text[:middle])) <= 1000:
+            low = middle
+        else:
+            high = middle - 1
+    text = text[:low]
+    # An excessively escaped source prefix must not crowd out the marker itself.
+    if marker.group().decode() not in text:
+        start = marker.start()
+        text = data[start:start + 1000].decode(errors='replace')
+        while len(encoded(text)) > 1000:
+            text = text[:len(text)//2]
+    return dict(advisory=True, marker=marker.group().decode(), offset=marker.start(),
+                context=bounded_json_text(data[max(0, line-128):line].decode(errors='replace'), 200),
+                text=text, leading_line_truncated=start > line,
+                truncated=start > 0 or len(text) < len(data[start:].decode(errors='replace')))
+
+
 def failure_snapshot(processes, logs, run_id, start, observation):
     """Snapshot before TERM/KILL; later shutdown chatter cannot replace this evidence."""
     evidence = dict(version=1, run_id=run_id, elapsed_ms=max(0, int((time.monotonic()-start)*1000)),
@@ -280,6 +315,10 @@ def failure_snapshot(processes, logs, run_id, start, observation):
             data = console_bytes(path)
             evidence['console'][path.name] = bounded_text(data.decode(errors='replace'), 2500)
             evidence['console_truncated'][path.name] = len(data) > 2500
+            if os.environ.get('ASAN_OPTIONS'):
+                first = first_sanitizer_diagnostic(data)
+                if first is not None:
+                    evidence.setdefault('first_sanitizer_diagnostic', {})[path.name] = first
             if path.name == 'zone-console.log':
                 evidence['progress'] = case_progress(data, run_id)
                 source = source_diagnostics(data)

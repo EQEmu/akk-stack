@@ -9,7 +9,8 @@ from prepare import record
 def identity(root, config_path, native, rust, runtime=None):
     # Read bytes rather than paths/mtimes: reuse must notice an in-place replacement.
     config = json.loads(config_path.read_text())
-    suffix = '-asan-v1' if config.get('diagnostic_profile') else ''
+    from sanitizers import policy_name
+    policy = policy_name(config)
     frontend = ('scripts/validate-worker-candidate', 'validation/worker/identity.py',
                 'validation/worker/prepare.py', 'validation/worker/client.py',
                 'validation/inputs.py', 'validation/profile.json', 'validation/runtime-fixture.json',
@@ -22,9 +23,9 @@ def identity(root, config_path, native, rust, runtime=None):
         or (Path(config['code_dir']) / name).exists())
     files = [*(root / name for name in frontend),
              *(Path(config['code_dir']) / name for name in worker), config_path,
-             Path('/etc/systemd/system/eqemu-validator' + suffix + '@.service'),
-             Path('/etc/systemd/system/eqemu-validator' + suffix + '.socket'),
-             Path('/etc/apparmor.d/eqemu-validator' + suffix),
+             Path('/etc/systemd/system') / (policy + '@.service'),
+             Path('/etc/systemd/system') / (policy + '.socket'),
+             Path('/etc/apparmor.d') / policy,
              Path(config['base_image']), native, rust]
     if runtime is not None:
         files.append(runtime)

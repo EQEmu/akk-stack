@@ -265,13 +265,16 @@ class BuildRuntime(unittest.TestCase):
         import test_client
         import test_normal_world_diagnostics
         with patch.object(runtime.shutil, 'disk_usage', return_value=SimpleNamespace(free=100*1024**3, used=0)):
-            error, candidate_failure = test_normal_world_diagnostics.AdapterDiagnostics().replay(True, source=True)
+            error, candidate_failure = test_normal_world_diagnostics.AdapterDiagnostics().replay(True, source=True, sanitizer=True)
         self.assertIsInstance(error, candidate_failure)
         self.assertNotIn('guest-secret', json.dumps(error.result))
         source = error.result['failure_evidence']['source_diagnostics']
         self.assertEqual(source['context'], 'result=failed [redacted]')
         self.assertEqual(source['stack'], '#0 native_function [redacted]\n')
         self.assertTrue(source['advisory'])
+        first = error.result['failure_evidence']['first_sanitizer_diagnostic']['zone-console.log']
+        self.assertIn('runtime error: fixture [redacted]', first['text'])
+        self.assertTrue(first['advisory'])
         self.assertFalse(error.result['failure_evidence']['stack_capture']['captured'])
         detail = dict(version=1, nonce='a'*32, scope='worker-build', exit_code=1,
             stage='normal-world', error='udp-timeout', selected_checks=list(runtime.BUILD_CHECKS),

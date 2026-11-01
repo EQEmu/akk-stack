@@ -98,14 +98,68 @@ class Sanitizers(unittest.TestCase):
 
     def test_ordinary_and_diagnostic_configurations_share_exact_lock(self):
         with tempfile.TemporaryDirectory() as temporary:
-            parent = Path(temporary); child = parent / 'asan-v1'; child.mkdir()
-            fd = runtime.acquire(dict(state_dir=str(parent)))
-            try:
-                with self.assertRaisesRegex(RuntimeError, 'Another worker operation'):
-                    runtime.acquire(dict(state_dir=str(child), diagnostic_profile=sanitizers.PROFILE))
-            finally: os.close(fd)
-            fd = runtime.acquire(dict(state_dir=str(child), diagnostic_profile=sanitizers.PROFILE)); os.close(fd)
-            self.assertFalse((child / 'worker.lock').exists())
+            parent = Path(temporary)
+            children = [parent / slot for slot in ('asan-v1', 'asan-v2')]
+            for child in children: child.mkdir()
+            configs = [dict(state_dir=str(parent)),
+                *(dict(state_dir=str(child), diagnostic_profile=sanitizers.PROFILE) for child in children)]
+            for owner in configs:
+                fd = runtime.acquire(owner)
+                try:
+                    for contender in configs:
+                        with self.assertRaisesRegex(RuntimeError, 'Another worker operation'):
+                            runtime.acquire(contender)
+                finally: os.close(fd)
+            for child in children: self.assertFalse((child / 'worker.lock').exists())
+
+    def test_readiness_requires_exact_selected_policy(self):
+        limits = {'memory.max': '64', 'pids.max': '64', 'memory.swap.max': '0',
+            'cpu.max': '200000 100000', 'no_new_privileges': '1', 'effective_capabilities': '0'}
+        base = Mock(); base.stat.return_value.st_size = 1
+        selected = [({}, 'eqemu-validator'),
+            ({'diagnostic_profile': sanitizers.PROFILE}, sanitizers.POLICIES[0]),
+            *[(dict(diagnostic_profile=sanitizers.PROFILE, diagnostic_policy=name), name)
+                for name in sanitizers.POLICIES]]
+        with patch.object(runtime, 'invocation', return_value='a'*32), \
+                patch.object(runtime, 'resource_state', return_value=limits), \
+                patch.object(runtime, 'root_file', return_value=base), \
+                patch.object(runtime.os.path, 'isfile', return_value=True), \
+                patch.object(runtime.os, 'access', side_effect=lambda path, mode: path != '/home/submitter'), \
+                patch.object(runtime.os, 'open', return_value=42), patch.object(runtime.os, 'close'), \
+                patch.object(runtime.pwd, 'getpwnam', return_value=Mock(pw_dir='/home/submitter')):
+            for fields, expected in selected:
+                for policy in ('eqemu-validator', *sanitizers.POLICIES):
+                    for label in (policy, policy + '//&unconfined', 'unconfined//&' + policy):
+                        with self.subTest(fields=fields, label=label), \
+                                patch.object(Path, 'read_text', return_value=label + ' (enforce)'):
+                            result = runtime.ready(dict(base_image='/base', submitter='submitter', **fields))
+                            self.assertEqual(result['checks']['apparmor'], policy == expected)
+                            self.assertEqual(result['exit_code'], 0 if policy == expected else 2)
+
+    def test_root_config_accepts_only_bounded_policy_selection(self):
+        import pwd
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); state = root / 'state'; state.mkdir(mode=0o700)
+            path = root / 'config.json'; account = pwd.getpwuid(os.getuid())
+            value = dict(version=1, user=account.pw_name, worker_uid=account.pw_uid,
+                worker_gid=account.pw_gid, state_dir=str(state), code_dir=str(root),
+                submitter=account.pw_name, socket='/run/test.sock', base_image='/public/base')
+            for fields in ({}, {'diagnostic_profile': sanitizers.PROFILE},
+                    *[dict(diagnostic_profile=sanitizers.PROFILE, diagnostic_policy=name)
+                        for name in sanitizers.POLICIES]):
+                path.write_text(json.dumps(dict(value, **fields)))
+                with patch.object(runtime, 'root_file', return_value=path) as trusted:
+                    self.assertEqual(runtime.config(path), dict(value, **fields))
+                    trusted.assert_called_once_with(path)
+            for fields in ({'diagnostic_policy': sanitizers.POLICIES[1]},
+                    dict(diagnostic_profile=sanitizers.PROFILE, diagnostic_policy='eqemu-validator-asan-v3'),
+                    dict(diagnostic_profile=sanitizers.PROFILE, diagnostic_policy=None)):
+                path.write_text(json.dumps(dict(value, **fields)))
+                with patch.object(runtime, 'root_file', return_value=path), self.assertRaises(ValueError):
+                    runtime.config(path)
+            with patch.object(runtime, 'root_file', side_effect=ValueError('Expected root-owned input')), \
+                    self.assertRaisesRegex(ValueError, 'root-owned'):
+                runtime.config(path)
 
     def test_generated_commands_check_flags_optimization_and_known_gaps(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -194,7 +248,22 @@ class Admission(unittest.TestCase):
 
     def prepared(self, temporary):
         output = Path(temporary) / 'package'
-        with patch.object(operator, 'run', side_effect=['a'*40 + '\n', '']):
+        # Supply retained host inputs as data; tests never depend on installed
+        # policy/runtime files and never publish onto actual system paths.
+        import pwd
+        from staging import FILES
+        current = dict(version=1, user='worker', worker_uid=os.getuid(), worker_gid=os.getgid(),
+            code_dir='/srv/eqemu-validator-code', state_dir='/var/lib/eqemu-validator',
+            socket='/run/eqemu-validator.sock', base_image='/public/base',
+            submitter=pwd.getpwuid(os.getuid()).pw_name)
+        retained = {path: ('retained ' + str(path)).encode() for path in (*operator.ORDINARY, *operator.RETAINED_V1)}
+        retained[operator.CONFIG] = json.dumps(current).encode()
+        retained.update({Path(current['code_dir']) / name: ('ordinary ' + name).encode() for name in FILES})
+        original_load = operator.load
+        def load(path, *args):
+            return retained[path] if path in retained else original_load(path, *args)
+        with patch.object(operator, 'run', side_effect=['a'*40 + '\n', '']), \
+                patch.object(operator, 'load', side_effect=load), patch.object(operator.os, 'geteuid', return_value=1000):
             summary = operator.prepare(output)
         return output, summary
 
@@ -203,7 +272,19 @@ class Admission(unittest.TestCase):
             output, summary = self.prepared(temporary)
             manifest, data, targets = operator.package(output, summary['manifest_sha256'])
             self.assertEqual(manifest['configuration']['diagnostic_profile'], sanitizers.PROFILE)
-            self.assertEqual(manifest['configuration']['state_dir'], '/var/lib/eqemu-validator/asan-v1')
+            self.assertEqual(manifest['configuration']['state_dir'], '/var/lib/eqemu-validator/asan-v2')
+            self.assertEqual(manifest['configuration']['diagnostic_policy'], operator.NAME)
+            self.assertEqual(manifest['configuration']['code_dir'], '/srv/eqemu-validator-asan-v2/' + 'a'*40)
+            self.assertEqual(manifest['configuration']['socket'], '/run/eqemu-validator-asan-v2.sock')
+            self.assertEqual(set(manifest['retained_v1_sha256']), {str(path) for path in operator.RETAINED_V1})
+            self.assertTrue({str(path) for path in operator.ORDINARY} <= set(manifest['ordinary_sha256']))
+            self.assertTrue(all(path not in targets.values() for path in (*operator.ORDINARY, *operator.RETAINED_V1)))
+            self.assertEqual(targets['config.json'], Path('/etc/eqemu-validator/asan-v2.json'))
+            self.assertEqual(targets['worker.socket'].name, operator.NAME + '.socket')
+            self.assertEqual(targets['worker.service'].name, operator.NAME + '@.service')
+            self.assertEqual(targets['apparmor'].name, operator.NAME)
+            self.assertEqual(summary['apply'][:2], ['/usr/bin/python3', '-I'])
+            self.assertEqual(summary['rollback'][:2], ['/usr/bin/python3', '-I'])
             self.assertIn(b'MemoryMax=6G', data['worker.service'])
             self.assertIn(b'CPUQuota=200%', data['worker.service'])
             self.assertIn(b'PrivateNetwork=yes', data['worker.service'])
@@ -213,6 +294,63 @@ class Admission(unittest.TestCase):
             (output / 'worker.service').write_bytes(b'changed')
             with self.assertRaisesRegex(ValueError,'bytes changed'): operator.package(output, summary['manifest_sha256'])
 
+    def test_preconditions_preserve_all_assets_and_require_all_three_workers_idle(self):
+        from staging import FILES
+        current = dict(code_dir='/srv/eqemu-validator-code', state_dir='/var/lib/eqemu-validator',
+            socket='/run/eqemu-validator.sock')
+        assets = {path: str(path).encode() for path in (*operator.ORDINARY, *operator.RETAINED_V1,
+            *(Path(current['code_dir']) / name for name in FILES if name != 'validation/worker/sanitizers.py'))}
+        assets[operator.CONFIG] = json.dumps(current).encode()
+        ordinary = {str(path): operator.sha(data) for path, data in assets.items() if path not in operator.RETAINED_V1}
+        manifest = dict(configuration=dict(current, code_dir='/srv/eqemu-validator-asan-v2/' + 'a'*40,
+            state_dir=str(operator.STATE), socket='/run/' + operator.NAME + '.sock',
+            diagnostic_profile=operator.PROFILE, diagnostic_policy=operator.NAME),
+            ordinary_sha256=ordinary, retained_v1_sha256={str(path): operator.sha(assets[path]) for path in operator.RETAINED_V1})
+        with patch.object(operator.os, 'geteuid', return_value=0), \
+                patch.object(operator, 'load', side_effect=lambda path: assets[path]), \
+                patch.object(operator, 'run', return_value='') as run, \
+                patch.object(Path, 'exists', return_value=False):
+            self.assertEqual(operator.preconditions(manifest), current)
+            self.assertEqual(run.call_args.args[0][-3:], ['eqemu-validator@*.service',
+                'eqemu-validator-asan-v1@*.service', 'eqemu-validator-asan-v2@*.service'])
+            for path in assets:
+                original = assets[path]; assets[path] += b'changed'
+                with self.subTest(changed=path), self.assertRaisesRegex(ValueError, 'policy changed'):
+                    operator.preconditions(manifest)
+                assets[path] = original
+            for unit in run.call_args.args[0][-3:]:
+                with patch.object(operator, 'run', return_value=unit), self.assertRaisesRegex(ValueError, 'connections'):
+                    operator.preconditions(manifest)
+            for state in (Path(current['state_dir']), operator.RETAINED_STATE, operator.STATE):
+                with patch.object(Path, 'exists', lambda path: path == state / 'active.json'), \
+                        self.assertRaisesRegex(ValueError, 'active record'):
+                    operator.preconditions(manifest)
+            incomplete = copy.deepcopy(manifest); incomplete['retained_v1_sha256'].pop(str(operator.RETAINED_V1[0]))
+            with self.assertRaisesRegex(ValueError, 'inventory'): operator.preconditions(incomplete)
+
+    def test_admission_contends_for_ordinary_lock_before_publishing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output, summary = self.prepared(temporary)
+            state = Path(temporary) / 'state'; state.mkdir()
+            lock = state / 'worker.lock'; lock.touch(mode=0o600)
+            fd = os.open(lock, os.O_RDWR)
+            current = dict(state_dir=str(state), worker_uid=os.getuid(), worker_gid=os.getgid())
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with patch.object(operator, 'root_operator'), \
+                        patch.object(operator, 'preconditions', return_value=current), \
+                        patch.object(operator, 'publish') as publish, patch.object(operator, 'run') as run:
+                    with self.assertRaises(BlockingIOError): operator.operate(output, summary['manifest_sha256'])
+                    publish.assert_not_called(); run.assert_not_called()
+            finally: os.close(fd)
+            lock.chmod(0o644)
+            with patch.object(operator, 'root_operator'), \
+                    patch.object(operator, 'preconditions', return_value=current), \
+                    patch.object(operator, 'publish') as publish, patch.object(operator, 'run') as run:
+                with self.assertRaisesRegex(ValueError, 'lock ownership/mode'):
+                    operator.operate(output, summary['manifest_sha256'])
+                publish.assert_not_called(); run.assert_not_called()
+
     def test_partial_publish_policy_and_socket_failures_roll_back_only_matching_additions(self):
         for failure in ('publish-first', 'publish-middle', 'publish-last', 'sync-first', 'sync-after-link', 'apparmor', 'socket'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
@@ -221,6 +359,9 @@ class Admission(unittest.TestCase):
                 parent = root / 'srv'; parent.mkdir()
                 state = root / 'state'; state.mkdir(); (state / 'worker.lock').touch(mode=0o600)
                 config = root / 'etc/asan.json'; config.parent.mkdir()
+                retained = {root / 'ordinary-policy': b'ordinary retained', root / 'v1-policy': b'v1 retained'}
+                for path, data in retained.items(): path.write_bytes(data)
+                v1_state = state / 'asan-v1'; v1_state.mkdir(); (v1_state / 'audit').write_bytes(b'v1 evidence')
                 loaded = False; published = 0
                 real_publish = operator.publish
                 manifest = json.loads((output / 'manifest.json').read_text())
@@ -255,7 +396,7 @@ class Admission(unittest.TestCase):
                         return operator.NAME + ' (enforce)\n' if loaded else ''
                     return original_read(path,*args,**kwargs)
                 current = dict(state_dir=str(state),worker_uid=os.getuid(),worker_gid=os.getgid())
-                with patch.object(operator,'PARENT',parent/'diagnostic'), patch.object(operator,'STATE',state/'asan-v1'), \
+                with patch.object(operator,'PARENT',parent/'diagnostic'), patch.object(operator,'STATE',state/'asan-v2'), \
                      restrictive_umask(), \
                      patch.object(operator,'DIAGNOSTIC_CONFIG',config), \
                      patch.object(operator,'root_operator'), \
@@ -280,6 +421,10 @@ class Admission(unittest.TestCase):
                         self.assertFalse(loaded)
                         self.assertFalse(config.exists())
                         self.assertTrue((state/'worker.lock').exists())
+                        self.assertEqual((v1_state / 'audit').read_bytes(), b'v1 evidence')
+                        for path, data in retained.items(): self.assertEqual(path.read_bytes(), data)
+                        self.assertTrue((parent / 'diagnostic' / manifest['source_commit']).exists())
+                        if failure in ('apparmor', 'socket'): self.assertTrue((state / 'asan-v2').exists())
                         for directory in (parent/'diagnostic').rglob('*'):
                             if directory.is_dir(): self.assertEqual(directory.stat().st_mode & 0o777,0o755)
                         self.assertTrue(operator.operate(output,summary['manifest_sha256'],rollback=True)['rolled_back'])

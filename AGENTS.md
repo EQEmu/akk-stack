@@ -48,8 +48,10 @@ Run source regressions with
 `python3 -B -m unittest discover -s tests/worker -v`. Wrapper tests use harmless
 trusted processes and real pipes/adapters, without candidate execution.
 
-`full-sanitizers` requires `--config /etc/eqemu-validator/asan-v1.json` and a
-separately reviewed/admitted diagnostic release. It selects
+`full-sanitizers` requires an explicit reviewed/admitted diagnostic configuration.
+The retained first release uses `/etc/eqemu-validator/asan-v1.json`; the prepared
+collector release uses `/etc/eqemu-validator/asan-v2.json` only after root admission.
+Both select
 `asan-ubsan-native-v1`, keeps ordinary selection intact, and runs the deliberate
 pass/UAF/OOB/UB/leak controls before the unchanged native utility and normal-world
 suites. Expected control failures qualify diagnostics; they are separate from
@@ -58,15 +60,26 @@ The pinned GCC symbolizer is `/usr/bin/addr2line`, verified in the guest and
 accepted only with real file/line control reports. Cargo-generated CXX/Rust,
 separate dependency builds/imported libraries and cppunit are uninstrumented.
 
+The collector release adds advisory `first_sanitizer_diagnostic` evidence for
+each native console: its first recognizable sanitizer header and following
+context use at most 1000 JSON-encoded bytes, preceding context at most 200.
+Existing 2500-byte console tails remain separate. The 1 MiB input-console,
+12,000-byte failure snapshot, 16 KiB private artifact and transport limits are
+unchanged. Existing scrubbing covers the new fields; they cannot supply a pass
+or replace process exits, suite finalization or cleanup. Unexported guest console
+heads cannot be recovered after guest cleanup, including from worker serial.
+
 Prepare admission data from a clean committed Stack checkout using
 `scripts/prepare-sanitizer-worker --output /private/fresh-package`. It starts no
 VM and prints exact apply/rollback argv plus manifest/operator hashes. A real
 root operator must review those finite assets, install the operator into the
 printed root-owned path, and externally verify that copy's exact SHA256 before
-running the printed `/usr/bin/python3 -I` command outside NoNewPrivs. Apply checks original policy/runtime hashes, quiescent
-connections and active records, and holds the ordinary worker lock. It adds a
-separate root-owned release, AppArmor profile and socket with the same physical
-resource caps. Diagnostic private state is separate; both sockets share the
+running the printed `/usr/bin/python3 -I` command outside NoNewPrivs. Preparation
+targets additive `asan-v2` assets and records the retained `asan-v1` policy hashes.
+Apply checks original policy/runtime and retained-v1 hashes, quiescent connections
+and active records across all three selections, and holds the ordinary worker
+lock. It adds a separate root-owned versioned release, AppArmor profile and socket
+with the same physical resource caps. Diagnostic private state is separate; all sockets share the
 ordinary lock, preventing concurrent VMs. No service runs at boot unless an
 operator separately enables it. Rollback validates every present policy asset,
 stops/removes only the matching diagnostic additions, tolerates partial

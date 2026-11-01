@@ -18,11 +18,16 @@ import subprocess
 import sys
 import tempfile
 
-NAME = 'eqemu-validator-asan-v1'
+NAME = 'eqemu-validator-asan-v2'
 CONFIG = Path('/etc/eqemu-validator/config.json')
-DIAGNOSTIC_CONFIG = Path('/etc/eqemu-validator/asan-v1.json')
-PARENT = Path('/srv/eqemu-validator-asan-v1')
-STATE = Path('/var/lib/eqemu-validator/asan-v1')
+DIAGNOSTIC_CONFIG = Path('/etc/eqemu-validator/asan-v2.json')
+PARENT = Path('/srv/eqemu-validator-asan-v2')
+STATE = Path('/var/lib/eqemu-validator/asan-v2')
+RETAINED_STATE = Path('/var/lib/eqemu-validator/asan-v1')
+RETAINED_V1 = (Path('/etc/eqemu-validator/asan-v1.json'),
+    Path('/etc/systemd/system/eqemu-validator-asan-v1.socket'),
+    Path('/etc/systemd/system/eqemu-validator-asan-v1@.service'),
+    Path('/etc/apparmor.d/eqemu-validator-asan-v1'))
 PROFILE = 'asan-ubsan-native-v1'
 ORDINARY = (CONFIG, Path('/etc/systemd/system/eqemu-validator.socket'),
     Path('/etc/systemd/system/eqemu-validator@.service'), Path('/etc/apparmor.d/eqemu-validator'))
@@ -50,19 +55,23 @@ def run(argv):
 
 
 def preconditions(manifest):
-    """Check the original policy byte-for-byte and refuse active worker services."""
+    """Preserve ordinary/v1 assets and require all three workers to be idle."""
     if os.geteuid() != 0: raise ValueError('Real root operator required; do not bypass NoNewPrivs')
     for name, expected in manifest['ordinary_sha256'].items():
         if sha(load(Path(name))) != expected: raise ValueError('Ordinary policy changed: ' + name)
+    if set(manifest['retained_v1_sha256']) != {str(path) for path in RETAINED_V1}:
+        raise ValueError('Retained v1 policy inventory mismatch')
+    for name, expected in manifest['retained_v1_sha256'].items():
+        if sha(load(Path(name))) != expected: raise ValueError('Retained v1 policy changed: ' + name)
     current = json.loads(load(CONFIG))
     expected = dict(manifest['configuration'])
-    expected.pop('diagnostic_profile'); expected.update(code_dir='/srv/eqemu-validator-code',
+    expected.pop('diagnostic_profile'); expected.pop('diagnostic_policy'); expected.update(code_dir='/srv/eqemu-validator-code',
         state_dir='/var/lib/eqemu-validator', socket='/run/eqemu-validator.sock')
     if current != expected: raise ValueError('Ordinary configuration differs from inspected baseline')
     units = run(['/usr/bin/systemctl', 'list-units', '--all', '--no-legend', '--plain',
-        'eqemu-validator@*.service', NAME + '@*.service'])
+        'eqemu-validator@*.service', 'eqemu-validator-asan-v1@*.service', NAME + '@*.service'])
     if units.strip(): raise ValueError('Worker connections must be absent')
-    for directory in (Path(current['state_dir']), STATE):
+    for directory in (Path(current['state_dir']), RETAINED_STATE, STATE):
         if (directory / 'active.json').exists(): raise ValueError('Worker active record requires inspection')
     return current
 
@@ -140,6 +149,9 @@ def operate(directory, expected, rollback=False):
         if not stat.S_ISREG(info.st_mode) or info.st_uid != current['worker_uid'] or info.st_mode & 0o077:
             raise ValueError('Shared worker lock ownership/mode changed')
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Recheck after taking the lock so an intervening connection cannot
+        # leave an active record between the initial inspection and admission.
+        preconditions(manifest)
         # The same lock is held through all policy/selection changes. Never
         # rerun a failed validator or start a VM during admission/rollback.
         if rollback:
@@ -184,8 +196,9 @@ def operate(directory, expected, rollback=False):
         run(['/usr/bin/systemctl', 'daemon-reload'])
         run(['/usr/bin/systemctl', 'start', NAME + '.socket'])
         run(['/usr/bin/systemctl', 'is-active', NAME + '.socket'])
-        for name, expected_sha in manifest['ordinary_sha256'].items():
-            if sha(load(Path(name))) != expected_sha: raise ValueError('Ordinary policy changed during admission')
+        for field in ('ordinary_sha256', 'retained_v1_sha256'):
+            for name, expected_sha in manifest[field].items():
+                if sha(load(Path(name))) != expected_sha: raise ValueError('Retained policy changed during admission: ' + name)
         return dict(admitted=True, configuration=str(DIAGNOSTIC_CONFIG), release=str(release),
                     ordinary_unchanged=True, vm_started=False, enabled_at_boot=False)
     finally: os.close(fd)
@@ -205,7 +218,7 @@ def prepare(output):
     output.mkdir(mode=0o700, parents=True)
     release = PARENT / commit
     config = dict(current, code_dir=str(release), state_dir=str(STATE),
-                  socket='/run/' + NAME + '.sock', diagnostic_profile=PROFILE)
+                  socket='/run/' + NAME + '.sock', diagnostic_profile=PROFILE, diagnostic_policy=NAME)
     replacements = dict(USER=current['user'], STATE=current['state_dir'], CODE=str(release),
         BASE=current['base_image'], SOCKET=config['socket'],
         SUBMITTER_GROUP=grp.getgrgid(pwd.getpwnam(current['submitter']).pw_gid).gr_name)
@@ -233,6 +246,7 @@ def prepare(output):
         release_files=sorted(FILES), files={name: sha(data) for name, data in files.items()},
         ordinary_sha256={str(path): sha(load(path)) for path in [*ORDINARY,
             *[Path(current['code_dir']) / name for name in FILES if name != 'validation/worker/sanitizers.py']]},
+        retained_v1_sha256={str(path): sha(load(path)) for path in RETAINED_V1},
         operator_sha256=sha(operator))
     raw = (json.dumps(manifest, indent=2, sort_keys=True) + '\n').encode()
     (output / 'manifest.json').write_bytes(raw)

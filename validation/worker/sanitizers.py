@@ -9,13 +9,25 @@ import shlex
 import time
 
 PROFILE = 'asan-ubsan-native-v1'
-POLICY = 'eqemu-validator-asan-v1'
+POLICIES = ('eqemu-validator-asan-v1', 'eqemu-validator-asan-v2')
 ENV = dict(ASAN_OPTIONS='halt_on_error=1:abort_on_error=0:detect_leaks=1:symbolize=1:exitcode=1',
            UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1:exitcode=1',
            ASAN_SYMBOLIZER_PATH='/usr/bin/addr2line')
 FLAGS = ('-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-g', '-O1',
          '-fno-omit-frame-pointer', '-fno-optimize-sibling-calls')
 MODES = ('pass', 'use-after-free', 'out-of-bounds', 'undefined', 'leak')
+
+
+def policy_name(config):
+    """Select only reviewed policies; legacy diagnostic configs retain v1."""
+    if config.get('diagnostic_profile') is None:
+        if 'diagnostic_policy' in config:
+            raise ValueError('Diagnostic policy requires a diagnostic profile')
+        return 'eqemu-validator'
+    policy = config.get('diagnostic_policy', POLICIES[0])
+    if config['diagnostic_profile'] != PROFILE or policy not in POLICIES:
+        raise ValueError('Unknown diagnostic policy')
+    return policy
 
 
 def checks(ordinary, profile):

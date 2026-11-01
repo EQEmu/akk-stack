@@ -75,11 +75,12 @@ def root_file(path):
 def config(path=CONFIG):
     value = read_json(root_file(path))
     required = {'version', 'user', 'worker_uid', 'worker_gid', 'state_dir', 'code_dir', 'submitter', 'socket', 'base_image'}
-    from sanitizers import PROFILE
-    if (set(value) not in (required, required | {'diagnostic_profile'})
+    from sanitizers import PROFILE, policy_name
+    if (set(value) not in (required, required | {'diagnostic_profile'}, required | {'diagnostic_profile', 'diagnostic_policy'})
             or value.get('diagnostic_profile') not in (None, PROFILE)
             or type(value['version']) is not int or value['version'] != 1):
         raise ValueError('Unsupported worker configuration')
+    policy_name(value)
     for key in ('state_dir', 'code_dir', 'socket', 'base_image'):
         if not isinstance(value[key], str) or not Path(value[key]).is_absolute() or any(ch in value[key] for ch in ',\n\r'):
             raise ValueError('Unsupported configured path: ' + key)
@@ -137,11 +138,11 @@ def ready(value):
     try:
         observed['apparmor'] = Path('/proc/self/attr/current').read_text().strip()
         # An unconfined stack member does not remove the enforcing profile's restrictions.
-        from sanitizers import POLICY
-        policy = POLICY if value.get('diagnostic_profile') else 'eqemu-validator'
+        from sanitizers import policy_name
+        policy = policy_name(value)
         checks['apparmor'] = observed['apparmor'] in (
             policy + ' (enforce)', policy + '//&unconfined (enforce)', 'unconfined//&' + policy + ' (enforce)')
-    except OSError:
+    except (OSError, ValueError):
         checks['apparmor'] = False
     try:
         limits = resource_state(); observed['resources'] = limits

@@ -20,7 +20,7 @@ from test_normal_world import baseline
 
 
 class AdapterDiagnostics(unittest.TestCase):
-    def replay(self, cleanup, large=False, database_error=False, cancel_root=False, source=False):
+    def replay(self, cleanup, large=False, database_error=False, cancel_root=False, source=False, sanitizer=False):
         """Reach run's real command/pipe/scrubbing seam with a harmless Python producer."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -38,12 +38,14 @@ class AdapterDiagnostics(unittest.TestCase):
                 diagnostic='deliberate assertion guest-secret')
             if source:
                 log = root/'zone-console.log'
-                log.write_bytes(b'EQEMU_NATIVE_DIAGNOSTIC_CONTEXT result=failed guest-secret\n'
+                log.write_bytes((b'/fixture.cpp:1: runtime error: fixture guest-secret\n' if sanitizer else b'')
+                    + b'EQEMU_NATIVE_DIAGNOSTIC_CONTEXT result=failed guest-secret\n'
                     b'EQEMU_NATIVE_DIAGNOSTIC_STACK_BEGIN\n#0 native_function guest-secret\n'
                     b'EQEMU_NATIVE_DIAGNOSTIC_STACK_END\n' + b'later console\n'*11000)
-                frame['failure_evidence'] = normal.failure_snapshot(
-                    [Mock(pid=2000000000, poll=Mock(return_value=None))], [log],
-                    'c'*32, time.monotonic(), dict(condition='udp-timeout'))
+                with patch.dict(os.environ, {'ASAN_OPTIONS': 'detect_leaks=1'} if sanitizer else {}):
+                    frame['failure_evidence'] = normal.failure_snapshot(
+                        [Mock(pid=2000000000, poll=Mock(return_value=None))], [log],
+                        'c'*32, time.monotonic(), dict(condition='udp-timeout'))
             if not cleanup:
                 frame['cleanup_diagnostics'] = dict(forced_kill=True,
                     survivors_before_kill=[dict(pid=123, name='python-child', state='S')],

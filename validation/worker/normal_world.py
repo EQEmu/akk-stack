@@ -5,6 +5,7 @@ nobody in the offline guest. The observer uses kernel-owned socket identities an
 an echoed EQ stream session challenge, not startup log strings.
 """
 import hashlib
+from contextlib import ExitStack, contextmanager, nullcontext
 import json
 import os
 from pathlib import Path
@@ -193,6 +194,34 @@ def console_bytes(path):
         if not stat.S_ISREG(info.st_mode) or info.st_size > 1024**2:
             raise ValueError('Console is not a bounded regular file')
         return stream.read(1024**2 + 1)
+
+
+@contextmanager
+def observer_credential_pipe(snapshot):
+    """Only root's original guest credentials reach observer stdin, never argv/config."""
+    if len(snapshot) > 1024:
+        raise ValueError('Observer credential budget')
+    read, write = os.pipe2(os.O_CLOEXEC)
+    with ExitStack() as stack:
+        reader = stack.enter_context(os.fdopen(read, 'rb'))
+        writer = stack.enter_context(os.fdopen(write, 'wb'))
+        writer.write(snapshot)
+        writer.close()
+        yield reader
+
+
+def read_observer_secrets():
+    stream = sys.stdin.buffer
+    if not stat.S_ISFIFO(os.fstat(stream.fileno()).st_mode):
+        raise ValueError('Observer requires a credential pipe')
+    raw = stream.read(1025)
+    if len(raw) > 1024:
+        raise ValueError('Observer credential budget')
+    values = json.loads(raw)
+    if (not isinstance(values, list) or len(values) != 2
+            or any(not isinstance(value, str) or not 1 <= len(value) <= 128 for value in values)):
+        raise ValueError('Invalid disposable credential snapshot')
+    return values
 
 
 def case_progress(data, run_id):
@@ -466,12 +495,7 @@ def observe(binary_dir, server, control):
     secrets = ()
     try:
         if os.environ.get('ASAN_OPTIONS'):
-            # These are the two guest-local values created by Runtime.configure,
-            # already readable by the native user. No host credentials enter here.
-            config = json.loads(console_bytes(server / 'eqemu_config.json'))['server']
-            secrets = (config['database']['password'], config['world']['key'])
-            if any(not isinstance(secret, str) or not secret for secret in secrets):
-                raise ValueError('Invalid disposable credential configuration')
+            secrets = read_observer_secrets()
         def guard():
             if cancelled:
                 observation['condition'] = 'cancelled'
@@ -695,6 +719,9 @@ def run(build, identity):
         if runtime.query('normal-activity-check', "SELECT zoneidnumber,version,short_name,idle_when_empty FROM zone WHERE zoneidnumber=202 AND version=0 AND short_name='poknowledge';").strip() != '202\t0\tpoknowledge\t0':
             raise RuntimeError('Empty-zone activity configuration missing')
         server = runtime.configure()
+        # Freeze the authoritative values before ownership transfer or any native
+        # execution. Candidate configuration changes cannot replace this snapshot.
+        credential_snapshot = encoded(tuple(runtime.secrets)) if build.ENV.get('ASAN_OPTIONS') else None
         config_path = server / 'eqemu_config.json'
         config = json.loads(config_path.read_text())
         config['server']['world']['loginserver'] = {'host': '127.0.0.1', 'port': '5998', 'account': '', 'password': ''}
@@ -719,9 +746,12 @@ def run(build, identity):
                     raise RuntimeError('Duplicate normal-world readiness phase')
                 ready = True
                 build.emit({'kind': 'stage', 'name': 'normal-world-ready', 'state': 'started'})
-        output = runtime.command('normal-world', [*prefix, '/usr/bin/python3', '/opt/normal_world.py',
-                                  str(build.WORK / 'build/bin'), str(server), control or 'positive'],
-                                 timeout=OBSERVE_SECONDS+30, on_line=phase)
+        with (observer_credential_pipe(credential_snapshot) if credential_snapshot is not None
+              else nullcontext()) as credentials:
+            output = runtime.command('normal-world', [*prefix, '/usr/bin/python3', '/opt/normal_world.py',
+                                      str(build.WORK / 'build/bin'), str(server), control or 'positive'],
+                                     timeout=OBSERVE_SECONDS+30, on_line=phase,
+                                     **({'stdin': credentials} if credentials is not None else {}))
         frames = [json.loads(line.removeprefix('NORMAL_WORLD_RESULT ')) for line in output.splitlines()
                   if line.startswith('NORMAL_WORLD_RESULT ')]
         if len(frames) != 1:

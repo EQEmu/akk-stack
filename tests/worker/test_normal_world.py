@@ -163,8 +163,8 @@ class Readiness(unittest.TestCase):
             server = Path(tmp)
             if sanitizer:
                 (server/'eqemu_config.json').write_text(json.dumps({'server': {
-                    'database': {'password': '0123456789abcdef'*3},
-                    'world': {'key': 'fedcba9876543210'*3}}}))
+                    'database': {'password': 'candidate-replacement'},
+                    'world': {'key': 'candidate-replacement'}}}))
             world, zone = Mock(pid=101), Mock(pid=102)
             world.poll.return_value = 1 if died else None
             zone.poll.return_value = None
@@ -230,7 +230,10 @@ class Readiness(unittest.TestCase):
                     replacement.write_bytes(reports[0].read_bytes())
                     replacement.replace(reports[0])
                 return clean
-            with patch.dict(os.environ, {'ASAN_OPTIONS': 'detect_leaks=1'} if sanitizer else {}), \
+            with (normal.observer_credential_pipe(normal.encoded(['0123456789abcdef'*3, 'fedcba9876543210'*3]))
+                  if sanitizer else contextlib.nullcontext()) as credentials, \
+                    patch.object(normal.sys, 'stdin', types.SimpleNamespace(buffer=credentials) if sanitizer else sys.stdin), \
+                    patch.dict(os.environ, {'ASAN_OPTIONS': 'detect_leaks=1'} if sanitizer else {}), \
                     patch.object(normal.os, 'geteuid', return_value=65534), \
                     patch.object(normal.resource, 'setrlimit'), patch.object(normal.Path, 'is_file', return_value=True), \
                     patch.object(normal.subprocess, 'Popen', side_effect=launch) as popen, \
@@ -258,7 +261,7 @@ class Readiness(unittest.TestCase):
             self.assertEqual(len(frames), 1)
             return frames[0]
 
-    def test_sanitized_observer_scrubs_config_credentials_before_excerpt_and_print(self):
+    def test_sanitized_observer_uses_original_pipe_credentials_despite_changed_config(self):
         result = self.run_observer(died=True, sanitizer=True)
         self.assertEqual(result['exit_code'], 1)
         self.assertTrue(result['cleanup_complete'])

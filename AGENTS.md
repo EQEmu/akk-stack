@@ -65,8 +65,9 @@ each native console: its first recognizable sanitizer header and following
 context use at most 1000 JSON-encoded bytes, preceding context at most 200.
 Existing 2500-byte console tails remain separate. The 1 MiB input-console,
 12,000-byte failure snapshot, 16 KiB private artifact and transport limits are
-unchanged. Guest credentials are masked before excerpt selection, preserving byte
-offsets; the outer scrubber remains in place. New fields cannot supply a pass
+unchanged. The root adapter freezes guest credentials before native execution and
+passes them through a bounded observer-only pipe. Masking precedes excerpt selection
+and preserves byte offsets; the outer scrubber remains in place. New fields cannot supply a pass
 or replace process exits, suite finalization or cleanup. Unexported guest console
 heads cannot be recovered after guest cleanup, including from worker serial.
 

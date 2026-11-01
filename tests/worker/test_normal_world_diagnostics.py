@@ -20,13 +20,15 @@ from test_normal_world import baseline
 
 
 class AdapterDiagnostics(unittest.TestCase):
-    def replay(self, cleanup, large=False, database_error=False, cancel_root=False, source=False, sanitizer=False):
+    def replay(self, cleanup, large=False, database_error=False, cancel_root=False, source=False, sanitizer=False, changed_config=False):
         """Reach run's real command/pipe/scrubbing seam with a harmless Python producer."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             build = types.SimpleNamespace(DEADLINE=time.monotonic()+10000, WORK=root/'build',
                 LOGS=root/'logs', ENV=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'),
                 emit=Mock(), sha=lambda _: 'b'*64, CandidateFailure=type('CandidateFailure', (Exception,), {}))
+            if sanitizer:
+                build.ENV['ASAN_OPTIONS'] = 'detect_leaks=1'
             build.LOGS.mkdir()
             frame = baseline()
             for key in ('fixture_manifest_sha256', 'binaries', 'database_cleanup'):
@@ -70,18 +72,32 @@ class AdapterDiagnostics(unittest.TestCase):
                     (server/'eqemu_config.json').write_text('{"server":{"world":{}}}')
                     shared = server/'shared'; shared.mkdir()
                     for name in ('items', 'spells'): (shared/name).write_text('fixture')
-                    self.secrets.append('guest-secret')
+                    self.secrets.extend(('guest-secret', 'guest-key'))
                     return server
                 def command(self, name, args, **kwargs):
+                    if name == 'normal-shared-memory' and changed_config:
+                        (root/'runtime/server/eqemu_config.json').write_text(
+                            '{"server":{"database":{"password":"candidate-replacement"},"world":{"key":"candidate-replacement"}}}')
                     if name != 'normal-world': return ''
                     script = 'print('+repr(output)+',end="")'
+                    if changed_config:
+                        script = ('import sys,time,json; from pathlib import Path; '
+                                  'sys.path.insert(0,'+repr(str(ROOT/'validation/worker'))+'); '
+                                  'import normal_world as normal; '
+                                  'original=normal.read_observer_secrets(); '
+                                  'assert original == ["guest-secret","guest-key"]; '
+                                  'frame='+repr(frame)+'; '
+                                  'frame["failure_evidence"]=normal.failure_snapshot([], [Path('+repr(str(log))+')], '
+                                  '"c"*32,time.monotonic(),dict(condition="child-exit"),original); '
+                                  'print("NORMAL_WORLD_RESULT "+json.dumps(frame))')
                     if cancel_root:
                         script = ('import os,signal,time; from pathlib import Path; '
                                   'Path('+repr(str(root/'observer.pid'))+').write_text(str(os.getpid())); '
                                   'os.kill(os.getppid(),signal.SIGTERM); time.sleep(30)')
                     return super().command(name,
                         [sys.executable, '-c', script],
-                        on_line=kwargs['on_line'], timeout=10)
+                        on_line=kwargs['on_line'], timeout=10,
+                        **({'stdin': kwargs['stdin']} if 'stdin' in kwargs else {}))
                 def cleanup(self):
                     if database_error: raise RuntimeError('database cleanup guest-secret failed')
                     return True
@@ -105,6 +121,16 @@ class AdapterDiagnostics(unittest.TestCase):
                         self.assertFalse(Path('/proc', str(pid)).exists())
                     return error, build.CandidateFailure
             self.fail('Assertion replay passed')
+
+    def test_shared_memory_config_changes_cannot_replace_authoritative_scrub_snapshot(self):
+        error, candidate_failure = self.replay(True, source=True, sanitizer=True, changed_config=True)
+        self.assertIsInstance(error, candidate_failure)
+        first = error.result['failure_evidence']['first_sanitizer_diagnostic']['zone-console.log']
+        self.assertIn('*', first['text'])
+        self.assertNotIn('guest', first['text'])
+        self.assertNotIn('guest-secret', json.dumps(error.result))
+        self.assertTrue(error.result['cleanup_complete'])
+        self.assertTrue(error.result['database_cleanup'])
 
     def test_guest_root_cancellation_is_infrastructure_without_invented_observer_evidence(self):
         error, candidate_failure = self.replay(True, cancel_root=True)

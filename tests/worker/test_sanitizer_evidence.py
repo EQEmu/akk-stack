@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest.mock import patch
 
@@ -102,6 +103,21 @@ class SanitizerEvidence(unittest.TestCase):
                 self.assertNotIn(max(matches, key=len), first[field])
                 self.assertLessEqual(len(normal.encoded(first['text'])), 1000)
                 self.assertLessEqual(len(normal.encoded(first['context'])), 200)
+
+    def test_observer_credentials_require_bounded_pipe_with_exact_guest_pair(self):
+        for value in ([], ['one'], ['one', 'two', 'three'], ['', 'two'], [1, 'two'], ['x'*129, 'two']):
+            with self.subTest(value=value), normal.observer_credential_pipe(normal.encoded(value)) as stream:
+                with patch.object(normal.sys, 'stdin', types.SimpleNamespace(buffer=stream)):
+                    with self.assertRaises(ValueError):
+                        normal.read_observer_secrets()
+        with tempfile.TemporaryFile() as stream:
+            stream.write(normal.encoded(['one', 'two'])); stream.seek(0)
+            with patch.object(normal.sys, 'stdin', types.SimpleNamespace(buffer=stream)):
+                with self.assertRaisesRegex(ValueError, 'credential pipe'):
+                    normal.read_observer_secrets()
+        with self.assertRaisesRegex(ValueError, 'credential budget'):
+            with normal.observer_credential_pipe(b'x'*1025):
+                self.fail('Oversized credential input accepted')
 
     def test_private_export_keeps_header_and_context_when_shrinking_tail(self):
         evidence = self.capture(b'context\n/source.cpp:1: runtime error: first\n' + b'tail\n'*10000)

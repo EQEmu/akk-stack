@@ -116,7 +116,8 @@ def start(root, spec, snapshot=False):
         # Freeze the small trusted frontend closure, never the candidate's code.
         files = ['scripts/validate-worker-candidate', 'validation/inputs.py',
                  'validation/profile.json', 'validation/runtime-fixture.json']
-        files += [str(p.relative_to(ROOT)) for p in sorted((ROOT / 'validation/worker').glob('*.py'))]
+        files += [str(p.relative_to(ROOT)) for p in sorted((ROOT / 'validation/worker').glob('*.py'))
+                  if p.name != 'jobs.py']
         records = {}
         for name in files:
             target = path / 'client' / name; target.parent.mkdir(parents=True, exist_ok=True)
@@ -125,7 +126,10 @@ def start(root, spec, snapshot=False):
             records[name] = hashlib.sha256(data).hexdigest()
         spec = dict(spec, client_files_sha256=records,
                     command=[str(path / 'client/scripts/validate-worker-candidate'), *spec['command'][1:]])
-    spec = dict(spec, version=1, job_id=job_id, uid=os.getuid(), created=now())
+    runner = path / 'runner.py'
+    runner.write_bytes(Path(__file__).read_bytes())
+    spec = dict(spec, version=1, job_id=job_id, uid=os.getuid(), created=now(),
+                runner_sha256=hashlib.sha256(runner.read_bytes()).hexdigest())
     write(path / 'job.json', spec)
     write(path / 'notification.json', dict(status='pending', attempts=0))
     # The child waits for the parent to persist its exact identity before launch.
@@ -133,7 +137,7 @@ def start(root, spec, snapshot=False):
         write(path / 'state.json', dict(status='starting'))
         try:
             with (path / 'runner.log').open('xb') as log:
-                process = subprocess.Popen(['/usr/bin/python3', '-I', str(Path(__file__).resolve()),
+                process = subprocess.Popen(['/usr/bin/python3', '-I', str(runner),
                     '--run', str(root), job_id], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                     start_new_session=True, close_fds=True)
             write(path / 'state.json', dict(status='running', runner=process_identity(process.pid)))
@@ -143,12 +147,53 @@ def start(root, spec, snapshot=False):
             write(path / 'state.json', dict(status='launch_failed', error=str(error)[:1000]))
             write(path / 'result.json', dict(status='launch_failed', returncode=None, finished=now(),
                                            cleanup_complete=None, error=str(error)[:1000]))
+    if (path / 'result.json').exists():
+        background_notify(path)
     return dict(job_id=job_id, artifacts=str(path))
+
+
+def background_notify(path):
+    """One detached delivery attempt for terminal paths without a live runner."""
+    try:
+        with (path / 'notification-runner.log').open('ab') as log:
+            process = subprocess.Popen(['/usr/bin/python3', '-I', str(path / 'runner.py'), '--notify',
+                str(path.parent), path.name], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                start_new_session=True, close_fds=True)
+        threading.Thread(target=process.wait, daemon=True).start()
+    except Exception as error:
+        with locked(path / 'notification.lock'):
+            previous = read(path / 'notification.json')
+            write(path / 'notification.json', dict(previous, status='failed', error=str(error)[:1000]))
+
+
+def alive(owner):
+    try:
+        state = (Path('/proc') / str(owner['pid']) / 'stat').read_text().rsplit(')', 1)[1].split()[0]
+        return state != 'Z' and process_identity(owner['pid']) == owner
+    except (FileNotFoundError, ProcessLookupError): return False
+
+
+def recover(path, cancelled=False):
+    """A dead supervisor cannot supply an exit code or remote cleanup receipt."""
+    if not (path / 'result.json').exists():
+        state = read(path / 'state.json')
+        try:
+            if process_identity(state['runner']['pid']) != state['runner']:
+                raise ValueError('Process ownership mismatch; refusing cancellation')
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+        if state.get('runner') and alive(state['runner']):
+            raise ValueError('Job is still running')
+        write(path / 'result.json', dict(status='cancelled' if cancelled else 'interrupted',
+            returncode=None, cleanup_complete=None, finished=now(),
+            error='Runner exited without a final validator receipt; remote cleanup unknown'))
 
 
 def notify(path):
     """Retry delivery only. An uncertain acknowledgement can duplicate the job ID."""
     with locked(path / 'notification.lock', blocking=False):
+        with locked(path / 'state.lock'):
+            recover(path)
         result = read(path / 'result.json')
         previous = read(path / 'notification.json')
         if previous['status'] == 'sent':
@@ -166,9 +211,9 @@ def notify(path):
         notification = dict(status='sending', attempts=attempt, started=now())
         write(path / 'notification.json', notification)
         try:
-            code, _ = capture([spec['adapter'], '--base-dir', spec['t3_base_dir'], '--thread', spec['thread']],
+            code, detail = capture([spec['adapter'], '--base-dir', spec['t3_base_dir'], '--thread', spec['thread']],
                 path / ('callback-' + str(attempt)), message.encode(), seconds=60, limit=CALLBACK_LIMIT)
-            notification.update(status='sent' if code == 0 else 'failed', returncode=code)
+            notification.update(status='sent' if code == 0 and not detail['pipe_drain_incomplete'] else 'failed', returncode=code)
         except Exception as error:
             notification.update(status='failed', error=str(error)[:1000])
         notification['finished'] = now()
@@ -180,9 +225,10 @@ def capture(argv, prefix, message=None, *, seconds=None, limit=LOG_LIMIT, cancel
     """Drain both real pipes to finite raw logs, preserving the process exit code."""
     process = subprocess.Popen(argv, stdin=subprocess.PIPE if message is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, env=env)
-    if on_started: on_started(process_identity(process.pid))
-    started = time.monotonic(); interrupted = None; total = [0, 0]; tail = bytearray()
+    started = time.monotonic(); interrupted = exited = killed = None
+    total = [0, 0]; tail = bytearray(); incomplete = False
     try:
+        if on_started: on_started(process_identity(process.pid))
         if message is not None:
             process.stdin.write(message); process.stdin.close()
         with selectors.DefaultSelector() as selector, Path(str(prefix) + '.stdout.log').open('xb') as stdout, \
@@ -190,14 +236,25 @@ def capture(argv, prefix, message=None, *, seconds=None, limit=LOG_LIMIT, cancel
             for index, pipe in enumerate((process.stdout, process.stderr)):
                 os.set_blocking(pipe.fileno(), False)
                 selector.register(pipe, selectors.EVENT_READ, (index, (stdout, stderr)[index]))
-            while selector.get_map() or process.poll() is None:
+            while True:
                 current = time.monotonic()
+                # Keep the session leader unreaped until pipe draining finishes.
+                # Its PID/PGID cannot be reused while signalling this owned group.
+                ended = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                if ended is not None and exited is None: exited = current
+                if not selector.get_map() and exited is not None: break
                 if interrupted is None and ((cancel is not None and cancel()) or
                         (seconds is not None and current - started > seconds)):
                     interrupted = current
-                    if process.poll() is None: process.send_signal(signal.SIGINT)
-                if interrupted is not None and current - interrupted > GRACE and process.poll() is None:
-                    process.kill()
+                    os.killpg(process.pid, signal.SIGINT)
+                if killed is None and ((interrupted is not None and current - interrupted > (5 if seconds else GRACE))
+                        or (exited is not None and current - exited > 2)):
+                    try: os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError: pass
+                    killed = current
+                if killed is not None and current - killed > 2:
+                    incomplete = bool(selector.get_map())
+                    break
                 for key, _ in selector.select(.1):
                     block = os.read(key.fd, 65536)
                     if not block:
@@ -208,9 +265,12 @@ def capture(argv, prefix, message=None, *, seconds=None, limit=LOG_LIMIT, cancel
                     if index == 0:
                         tail.extend(block); del tail[:-131072]
             return process.wait(), dict(stdout_bytes=total[0], stderr_bytes=total[1],
-                log_limit=limit, truncated=any(count > limit for count in total), tail=bytes(tail))
+                log_limit=limit, truncated=any(count > limit for count in total),
+                pipe_drain_incomplete=incomplete, tail=bytes(tail))
     finally:
-        if process.poll() is None: process.kill()
+        if process.returncode is None:
+            try: os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
         process.wait()
         process.stdout.close(); process.stderr.close()
 
@@ -264,9 +324,7 @@ def status(path):
     state = read(path / 'state.json')
     result = read(path / 'result.json') if (path / 'result.json').exists() else None
     if result is None and state.get('runner'):
-        try: alive = process_identity(state['runner']['pid']) == state['runner']
-        except (FileNotFoundError, ProcessLookupError): alive = False
-        if not alive:
+        if not alive(state['runner']):
             state = dict(state, status='interrupted', cleanup_complete=None)
     return dict(job_id=path.name, artifacts=str(path), state=state, result=result,
                 notification=read(path / 'notification.json'))
@@ -277,10 +335,15 @@ def cancel(path):
         if (path / 'result.json').exists(): return status(path)
         state = read(path / 'state.json')
         # Verify before recording cancellation; never signal another process.
-        # A marker also works before Python installs its signal handlers. Signal
-        # zero verifies the exact pidfd without interrupting startup/publication.
-        signal_owned(state['runner'], 0)
+        if not alive(state['runner']):
+            if state.get('validator') and alive(state['validator']):
+                signal_owned(state['validator'], signal.SIGINT)
+            recover(path, cancelled=True)
+        else:
+            # Marker also works before Python installs its signal handlers.
+            signal_owned(state['runner'], 0)
         write(path / 'cancel.json', dict(requested=now()))
+    if (path / 'result.json').exists(): background_notify(path)
     return status(path)
 
 
@@ -303,7 +366,9 @@ def main(argv=None):
     try:
         if args.action == 'start':
             if not re.fullmatch('[a-f0-9]{40}', args.commit): raise ValueError('Expected full source commit SHA')
-            if not re.fullmatch(r'(?:mcp:)?[a-f0-9-]{36}', args.thread): raise ValueError('Expected explicit thread ID')
+            if (not args.thread or len(args.thread) > 512 or args.thread.startswith('-')
+                    or any(ord(ch) < 33 or ord(ch) == 127 for ch in args.thread)):
+                raise ValueError('Expected bounded explicit control-free thread ID')
             if not args.t3_base_dir.is_absolute() or not args.t3_base_dir.is_dir():
                 raise ValueError('Expected explicit existing T3 data directory')
             # GitTree reads objects without candidate hooks/config or code execution.
@@ -330,5 +395,7 @@ def main(argv=None):
 if __name__ == '__main__':
     if len(sys.argv) == 4 and sys.argv[1] == '--run':
         run(Path(sys.argv[2]), sys.argv[3])
+    elif len(sys.argv) == 4 and sys.argv[1] == '--notify':
+        notify(job_path(Path(sys.argv[2]), sys.argv[3]))
     else:
         raise SystemExit(main())

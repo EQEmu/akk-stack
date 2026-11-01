@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'validation/worker'))
@@ -150,6 +151,69 @@ class Jobs(unittest.TestCase):
         self.assertEqual(value['args'], ['thread', 'send', '--base-dir', str(self.root), '--json', 'explicit-thread', '-'])
         self.assertEqual(value['message'], 'bounded summary')
         self.assertEqual(value['marker'], 'trusted')
+
+    def test_exited_parent_descendant_pipe_is_bounded_and_owned_child_stopped(self):
+        child = self.root / 'pipe-child'
+        script = ('import subprocess,sys\n'
+            + 'p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"])\n'
+            + 'open(' + repr(str(child)) + ',"w").write(str(p.pid))\n')
+        started = time.monotonic()
+        code, detail = jobs.capture(['/usr/bin/python3', '-c', script], self.root / 'pipes', seconds=.2)
+        self.assertEqual(code, 0)
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertFalse(detail['pipe_drain_incomplete'])
+        pid = int(child.read_text())
+        try: self.assertFalse(jobs.alive(jobs.process_identity(pid)))
+        except (FileNotFoundError, ProcessLookupError): pass
+        # The same seam must still publish a durable job result and callback.
+        path = self.start(script)
+        value = self.wait(path)
+        self.assertEqual(value['result']['returncode'], 0)
+        self.assertFalse(value['result']['logs']['pipe_drain_incomplete'])
+
+    def test_runner_death_cancel_uses_owned_validator_and_never_infers_cleanup(self):
+        ready = self.root / 'ready'; stopped = self.root / 'stopped'
+        path = self.start('import signal,time,pathlib\n'
+            + 'def stop(*args):\n pathlib.Path(' + repr(str(stopped)) + ').touch()\n raise SystemExit(2)\n'
+            + 'signal.signal(signal.SIGINT,stop)\npathlib.Path(' + repr(str(ready)) + ').touch()\ntime.sleep(30)\n')
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline: time.sleep(.02)
+        self.assertTrue(ready.exists())
+        state = jobs.read(path / 'state.json')
+        jobs.signal_owned(state['runner'], signal.SIGKILL)
+        while jobs.alive(state['runner']) and time.monotonic() < deadline: time.sleep(.02)
+        self.assertEqual(jobs.status(path)['state']['status'], 'interrupted')
+        jobs.cancel(path)
+        value = self.wait(path)
+        self.assertEqual(value['result']['status'], 'cancelled')
+        self.assertIsNone(value['result']['returncode'])
+        self.assertIsNone(value['result']['cleanup_complete'])
+        while not stopped.exists() and time.monotonic() < deadline: time.sleep(.02)
+        self.assertTrue(stopped.exists())
+        self.assertEqual(jobs.notify(path)['attempts'], 1)
+
+    def test_runner_bootstrap_is_frozen_and_launch_failure_notifies(self):
+        # Change the source file immediately after copying it, before exec loads
+        # the runner; only the job's recorded private copy may execute.
+        source = self.root / 'source-jobs.py'; source.write_bytes(Path(jobs.__file__).read_bytes())
+        original = subprocess.Popen
+        def launch(*args, **kwargs):
+            source.unlink()
+            return original(*args, **kwargs)
+        with patch.object(jobs, '__file__', str(source)), patch.object(jobs.subprocess, 'Popen', side_effect=launch):
+            path = self.start('print("{}")\n')
+        self.assertEqual(self.wait(path)['result']['returncode'], 0)
+        launches = 0
+        def fail_once(*args, **kwargs):
+            nonlocal launches
+            launches += 1
+            if launches == 1: raise OSError('deliberate runner launch failure')
+            return original(*args, **kwargs)
+        with patch.object(jobs.subprocess, 'Popen', side_effect=fail_once):
+            path = self.start(command=['/never-launched-validator'])
+        value = self.wait(path)
+        self.assertEqual(value['result']['status'], 'launch_failed')
+        self.assertEqual(value['notification']['status'], 'sent')
 
 
 if __name__ == '__main__': unittest.main()

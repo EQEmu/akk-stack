@@ -365,9 +365,13 @@ def validate(value):
                 'fixture_manifest_sha256', 'binaries', 'database_cleanup', 'inserver_tests'}
     if not isinstance(value, dict) or set(value) not in (required, required | {'native_exit_codes'}):
         raise ValueError('Missing normal-world baseline')
-    if 'native_exit_codes' in value and value['native_exit_codes'] != [
-            dict(name='world', returncode=0), dict(name='zone', returncode=0)]:
-        raise ValueError('Sanitized native exit codes did not pass')
+    if 'native_exit_codes' in value:
+        exits = value['native_exit_codes']
+        if (not isinstance(exits, list) or len(exits) != 2
+                or any(not isinstance(item, dict) or set(item) != {'name', 'returncode'}
+                    or item['name'] != name or type(item['returncode']) is not int or item['returncode'] != 0
+                    for name, item in zip(('world', 'zone'), exits))):
+            raise ValueError('Sanitized native exit codes did not pass')
     if (type(value['exit_code']) is not int or value['exit_code'] != 0 or value['control'] is not None
             or value['cleanup_complete'] is not True or value['database_cleanup'] is not True):
         raise ValueError('Normal-world completion/cleanup')

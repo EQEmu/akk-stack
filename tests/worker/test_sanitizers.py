@@ -1,5 +1,6 @@
 """Diagnostic policy/protocol regressions. No native/Cargo candidate or VM runs."""
 import copy
+import contextlib
 import fcntl
 import json
 import os
@@ -23,6 +24,13 @@ import sanitizers
 import diagnostic_operator as operator
 from test_normal_world import baseline
 from test_failure_evidence import failure
+
+
+@contextlib.contextmanager
+def restrictive_umask():
+    prior = os.umask(0o077)
+    try: yield
+    finally: os.umask(prior)
 
 
 class Sanitizers(unittest.TestCase):
@@ -127,7 +135,7 @@ class Sanitizers(unittest.TestCase):
     def test_late_native_nonzero_cannot_pass_normal_world_receipt(self):
         value = dict(baseline(), native_exit_codes=[dict(name='world',returncode=0),dict(name='zone',returncode=0)])
         normal_world.validate(value)
-        for code in (1, -11, -15, None):
+        for code in (1, -11, -15, None, False):
             changed = copy.deepcopy(value); changed['native_exit_codes'][1]['returncode'] = code
             with self.assertRaisesRegex(ValueError, 'native exit'): normal_world.validate(changed)
 
@@ -232,6 +240,7 @@ class Admission(unittest.TestCase):
                     return original_read(path,*args,**kwargs)
                 current = dict(state_dir=str(state),worker_uid=os.getuid(),worker_gid=os.getgid())
                 with patch.object(operator,'PARENT',parent/'diagnostic'), patch.object(operator,'STATE',state/'asan-v1'), \
+                     restrictive_umask(), \
                      patch.object(operator,'DIAGNOSTIC_CONFIG',config), \
                      patch.object(operator,'root_operator'), \
                      patch.object(operator,'preconditions',return_value=current), \
@@ -255,6 +264,8 @@ class Admission(unittest.TestCase):
                         self.assertFalse(loaded)
                         self.assertFalse(config.exists())
                         self.assertTrue((state/'worker.lock').exists())
+                        for directory in (parent/'diagnostic').rglob('*'):
+                            if directory.is_dir(): self.assertEqual(directory.stat().st_mode & 0o777,0o755)
                         self.assertTrue(operator.operate(output,summary['manifest_sha256'],rollback=True)['rolled_back'])
 
 

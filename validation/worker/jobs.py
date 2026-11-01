@@ -106,6 +106,43 @@ def signal_owned(owner, signum):
         os.close(fd)
 
 
+def stop_owned(owner, grace=GRACE):
+    """Cancel an orphaned frontend via one pidfd, retaining its grace deadline."""
+    fd = os.pidfd_open(owner['pid'])
+    try:
+        if process_identity(owner['pid']) != owner or owner['uid'] != os.getuid():
+            raise ValueError('Process ownership mismatch; refusing cancellation')
+        signal.pidfd_send_signal(fd, signal.SIGINT)
+        with selectors.DefaultSelector() as selector:
+            selector.register(fd, selectors.EVENT_READ)
+            escalated = not bool(selector.select(grace))
+            if escalated: signal.pidfd_send_signal(fd, signal.SIGKILL)
+            if not selector.select(5): raise RuntimeError('Owned frontend exit not confirmed')
+        return dict(frontend_exit_confirmed=True, escalated=escalated, cleanup_complete=None)
+    finally:
+        os.close(fd)
+
+
+def cancel_abandoned(path):
+    """Notification-independent cancellation only, never launches validation."""
+    with locked(path / 'cancel.lock', blocking=False):
+        with locked(path / 'state.lock'):
+            state = read(path / 'state.json')
+            if state.get('canceller') != process_identity(os.getpid()):
+                raise ValueError('Not the selected cancellation process')
+        detail = dict(frontend_exit_confirmed=False, cleanup_complete=None)
+        try:
+            if alive(state['validator']): detail.update(stop_owned(state['validator']))
+            else: detail['frontend_exit_confirmed'] = True
+        except Exception as error:
+            detail['error'] = str(error)[:1000]
+        detail['finished'] = now()
+        write(path / 'cancellation.json', detail)
+        with locked(path / 'state.lock'):
+            recover(path, cancelled=True)
+        notify(path)
+
+
 def start(root, spec, snapshot=False):
     """Internal process seam accepts trusted test fixtures; CLI exposes only full."""
     root = root.absolute()
@@ -327,19 +364,29 @@ def status(path):
         if not alive(state['runner']):
             state = dict(state, status='interrupted', cleanup_complete=None)
     return dict(job_id=path.name, artifacts=str(path), state=state, result=result,
+                cancellation=read(path / 'cancellation.json') if (path / 'cancellation.json').exists() else None,
                 notification=read(path / 'notification.json'))
 
 
 def cancel(path):
     with locked(path / 'state.lock'):
-        if (path / 'result.json').exists(): return status(path)
         state = read(path / 'state.json')
         # Verify before recording cancellation; never signal another process.
         if not alive(state['runner']):
             if state.get('validator') and alive(state['validator']):
-                signal_owned(state['validator'], signal.SIGINT)
-            recover(path, cancelled=True)
+                signal_owned(state['validator'], 0)
+                if not state.get('canceller') or not alive(state['canceller']):
+                    with (path / 'cancellation-runner.log').open('ab') as log:
+                        process = subprocess.Popen(['/usr/bin/python3', '-I', str(path / 'runner.py'),
+                            '--cancel-owned', str(path.parent), path.name], stdin=subprocess.DEVNULL,
+                            stdout=log, stderr=log, start_new_session=True, close_fds=True)
+                    state['canceller'] = process_identity(process.pid)
+                    write(path / 'state.json', state)
+                    threading.Thread(target=process.wait, daemon=True).start()
+            else:
+                recover(path, cancelled=True)
         else:
+            if (path / 'result.json').exists(): return status(path)
             # Marker also works before Python installs its signal handlers.
             signal_owned(state['runner'], 0)
         write(path / 'cancel.json', dict(requested=now()))
@@ -397,5 +444,7 @@ if __name__ == '__main__':
         run(Path(sys.argv[2]), sys.argv[3])
     elif len(sys.argv) == 4 and sys.argv[1] == '--notify':
         notify(job_path(Path(sys.argv[2]), sys.argv[3]))
+    elif len(sys.argv) == 4 and sys.argv[1] == '--cancel-owned':
+        cancel_abandoned(job_path(Path(sys.argv[2]), sys.argv[3]))
     else:
         raise SystemExit(main())

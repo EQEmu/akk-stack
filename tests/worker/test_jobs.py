@@ -183,14 +183,35 @@ class Jobs(unittest.TestCase):
         jobs.signal_owned(state['runner'], signal.SIGKILL)
         while jobs.alive(state['runner']) and time.monotonic() < deadline: time.sleep(.02)
         self.assertEqual(jobs.status(path)['state']['status'], 'interrupted')
+        # A notification-only recovery publishes interruption but must leave
+        # exact cancellation of the surviving validator available afterward.
+        self.assertEqual(jobs.notify(path)['status'], 'sent')
         jobs.cancel(path)
         value = self.wait(path)
-        self.assertEqual(value['result']['status'], 'cancelled')
+        self.assertEqual(value['result']['status'], 'interrupted')
         self.assertIsNone(value['result']['returncode'])
         self.assertIsNone(value['result']['cleanup_complete'])
         while not stopped.exists() and time.monotonic() < deadline: time.sleep(.02)
         self.assertTrue(stopped.exists())
         self.assertEqual(jobs.notify(path)['attempts'], 1)
+
+    def test_orphan_cancellation_enforces_grace_against_sigint_ignoring_process(self):
+        ready = self.root / 'ignoring-ready'
+        process = subprocess.Popen(['/usr/bin/python3', '-c',
+            'import signal,time,pathlib; signal.signal(signal.SIGINT,signal.SIG_IGN); '
+            + 'pathlib.Path(' + repr(str(ready)) + ').touch(); time.sleep(30)'], start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and time.monotonic() < deadline: time.sleep(.02)
+            self.assertTrue(ready.exists())
+            result = jobs.stop_owned(jobs.process_identity(process.pid), grace=.1)
+            self.assertTrue(result['frontend_exit_confirmed'])
+            self.assertTrue(result['escalated'])
+            self.assertIsNone(result['cleanup_complete'])
+            self.assertEqual(process.wait(timeout=2), -signal.SIGKILL)
+        finally:
+            if process.poll() is None: process.kill()
+            process.wait()
 
     def test_runner_bootstrap_is_frozen_and_launch_failure_notifies(self):
         # Change the source file immediately after copying it, before exec loads

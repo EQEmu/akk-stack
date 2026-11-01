@@ -25,12 +25,15 @@ def main():
     parser.add_argument('--runtime-input', type=Path, help='Pinned public runtime ISO (default: declared path under input-store)')
     parser.add_argument('--world-control', choices=('startup', 'assertion', 'cancel'), help='Fixed non-passing normal-world qualification control')
     parser.add_argument('--config', type=Path, default=CONFIG)
+    parser.add_argument('--profile', choices=('asan-ubsan-native-v1',), help='Requires separately admitted diagnostic worker')
     parser.add_argument('--prepare-only', type=Path, metavar='OUTPUT_ISO')
     parser.add_argument('--identity', action='store_true', help='Print AFK contract identity without connecting to the worker or running candidate code')
     args = parser.parse_args()
     try:
         fixture = json.loads((Path(__file__).resolve().parents[1] / 'validation/runtime-fixture.json').read_text())
         runtime_input = args.runtime_input or args.input_store / fixture['iso']['path']
+        if args.profile and json.loads(args.config.read_text()).get('diagnostic_profile') != args.profile:
+            raise RuntimeError('Selected frontend and admitted worker profiles differ')
         if args.identity:
             print(json.dumps(identity(Path(__file__).resolve().parents[1], args.config,
                                      args.input_store / 'build-inputs-20260925-v3/build-inputs.iso',
@@ -40,13 +43,16 @@ def main():
             output = args.prepare_only or Path(tmp) / 'payload.iso'
             if not args.prepare_only:
                 config = json.loads(args.config.read_text())
+                if config.get('diagnostic_profile') != args.profile:
+                    raise RuntimeError('Selected frontend and admitted worker profiles differ')
                 readiness = exchange(config['socket'], {'version': 1, 'operation': 'check'})
                 if readiness['exit_code'] != 0:
                     raise RuntimeError('Worker readiness failed: ' + json.dumps(readiness))
                 if int(readiness['observed']['resources']['memory.max']) < 6 * 1024**3:
                     raise RuntimeError('Apply the reviewed 6 GiB/18360-second worker service update first')
             request = prepare(args.repo, args.commit, args.websocketpp or args.repo / 'submodules/websocketpp',
-                              args.input_store / 'build-inputs-20260925-v3/build-inputs.iso', args.rust_input, output, runtime_input, args.world_control)
+                              args.input_store / 'build-inputs-20260925-v3/build-inputs.iso', args.rust_input, output, runtime_input,
+                              args.world_control, **({'diagnostic_profile': args.profile} if args.profile else {}))
             if args.prepare_only:
                 # Preparation success is explicitly not an execution pass.
                 print(json.dumps(dict(scope='prepared-input-only', executed=False, request=request)))

@@ -363,8 +363,11 @@ def validate(value):
     required = {'exit_code', 'cleanup_complete', 'control', 'ready_seconds', 'baseline_seconds',
                 'responsive_samples', 'cpu_ticks', 'clock_ticks_per_second',
                 'fixture_manifest_sha256', 'binaries', 'database_cleanup', 'inserver_tests'}
-    if not isinstance(value, dict) or set(value) != required:
+    if not isinstance(value, dict) or set(value) not in (required, required | {'native_exit_codes'}):
         raise ValueError('Missing normal-world baseline')
+    if 'native_exit_codes' in value and value['native_exit_codes'] != [
+            dict(name='world', returncode=0), dict(name='zone', returncode=0)]:
+        raise ValueError('Sanitized native exit codes did not pass')
     if (type(value['exit_code']) is not int or value['exit_code'] != 0 or value['control'] is not None
             or value['cleanup_complete'] is not True or value['database_cleanup'] is not True):
         raise ValueError('Normal-world completion/cleanup')
@@ -500,6 +503,14 @@ def observe(binary_dir, server, control):
             cleanup = {}
             try:
                 result['cleanup_complete'] = stop(processes, diagnostics=cleanup)
+                if os.environ.get('ASAN_OPTIONS'):
+                    # Sanitizers can report during graceful shutdown, after the
+                    # source-owned suite already wrote its passed JSON frame.
+                    result['native_exit_codes'] = [dict(name=name, returncode=process.poll())
+                        for name, process in zip(('world', 'zone'), processes[:2])]
+                    if any(item['returncode'] != 0 for item in result['native_exit_codes']):
+                        result.update(exit_code=1, error='Sanitized native process exited nonzero during execution/shutdown')
+                    before_cleanup = failure_snapshot(processes, logs, run_id, start, observation)
             except Exception as error:
                 result.update(exit_code=2, cleanup_complete=False, cleanup_error=bounded_json_text(error, 500))
                 cleanup['error'] = result['cleanup_error']

@@ -87,6 +87,7 @@ class WorkerSetup(unittest.TestCase):
         (code/'validation/worker').mkdir(parents=True)
         (code/'scripts').mkdir()
         for name in ('validation/worker/runtime.py','validation/worker/guest.py',
+                     'validation/worker/sanitizers.py',
                      'validation/worker/client.py','validation/worker/build_guest.py',
                      'validation/worker/snapshot.py','validation/worker/format_guest.py',
                      'validation/worker/quick_snapshot.py','validation/worker/quick_guest.py',

@@ -22,7 +22,7 @@ scripts/validation-job retry-notification JOB_ID
 
 Start returns the job ID and private artifact directory immediately. Optional
 `--jobs-dir /private/job-root` precedes the subcommand and must be reused for
-status/cancel/retry. Only `full` is exposed. It snapshots the trusted client
+status/cancel/retry. Named commands are `full` and `full-sanitizers`. Each snapshots the trusted client
 helpers, records the source commit/tree/observed HEAD, and leaves candidate source
 selection and cleanliness checks to the full validator. It captures no dirty
 working-copy snapshot. `job.json` contains exact invocation and helper hashes.
@@ -47,3 +47,27 @@ Never use `--wait` or guess a newest thread/data directory.
 Run source regressions with
 `python3 -B -m unittest discover -s tests/worker -v`. Wrapper tests use harmless
 trusted processes and real pipes/adapters, without candidate execution.
+
+`full-sanitizers` requires `--config /etc/eqemu-validator/asan-v1.json` and a
+separately reviewed/admitted diagnostic release. It selects
+`asan-ubsan-native-v1`, keeps ordinary selection intact, and runs the deliberate
+pass/UAF/OOB/UB/leak controls before the unchanged native utility and normal-world
+suites. Expected control failures qualify diagnostics; they are separate from
+the utility/scenario verdict. Sanitizers remain fatal, including exit-time LSan.
+The pinned GCC symbolizer is `/usr/bin/addr2line`, verified in the guest and
+accepted only with real file/line control reports. Cargo-generated CXX/Rust,
+separate dependency builds/imported libraries and cppunit are uninstrumented.
+
+Prepare admission data from a clean committed Stack checkout using
+`scripts/prepare-sanitizer-worker --output /private/fresh-package`. It starts no
+VM and prints exact apply/rollback argv plus manifest/operator hashes. A real
+root operator must review those finite assets and run the printed operator
+outside NoNewPrivs. Apply checks original policy/runtime hashes, quiescent
+connections and active records, and holds the ordinary worker lock. It adds a
+separate root-owned release, AppArmor profile and socket with the same physical
+resource caps. Diagnostic private state is separate; both sockets share the
+ordinary lock, preventing concurrent VMs. No service runs at boot unless an
+operator separately enables it. Rollback validates every present policy asset,
+stops/removes only the matching diagnostic additions, tolerates partial
+admission, and retains release/state as audit evidence. It never changes the
+ordinary installed client, AFK configuration, ordinary root admission or immutable files.

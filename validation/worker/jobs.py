@@ -394,7 +394,7 @@ def main(argv=None):
     parser.add_argument('--jobs-dir', type=Path, default=DEFAULT_JOBS)
     sub = parser.add_subparsers(dest='action', required=True)
     launch = sub.add_parser('start')
-    launch.add_argument('profile', choices=('full',))
+    launch.add_argument('profile', choices=('full', 'full-sanitizers'))
     launch.add_argument('--repo', type=Path, required=True)
     launch.add_argument('--commit', required=True, help='Exact immutable 40-character source commit')
     launch.add_argument('--thread', required=True)
@@ -422,6 +422,12 @@ def main(argv=None):
                 head = view.location('HEAD')
             command = [str(ROOT / 'scripts/validate-worker-candidate'), '--repo', str(args.repo.resolve()),
                 '--commit', args.commit, '--websocketpp', str(args.websocketpp.resolve()), '--config', str(args.config.resolve())]
+            if args.profile == 'full-sanitizers':
+                from sanitizers import PROFILE
+                config = json.loads(args.config.read_text())
+                if config.get('diagnostic_profile') != PROFILE:
+                    raise ValueError('full-sanitizers requires the exact admitted diagnostic --config')
+                command += ['--profile', PROFILE]
             value = start(args.jobs_dir, dict(profile=args.profile, candidate=args.commit, tree=tree,
                 observed_head=head, source_selection='immutable commit; full validator rejects dirty checkout; no dirty snapshot',
                 command=command, validator_sha256=hashlib.sha256(Path(command[0]).read_bytes()).hexdigest(),

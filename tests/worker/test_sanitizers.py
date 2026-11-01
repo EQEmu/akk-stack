@@ -16,14 +16,45 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'validation/worker'))
 import build_guest
 import guest
+import identity
 import normal_world
 import runtime
 import sanitizers
 import diagnostic_operator as operator
 from test_normal_world import baseline
+from test_failure_evidence import failure
 
 
 class Sanitizers(unittest.TestCase):
+    def test_identity_accepts_ordinary_installed_closure_and_requires_diagnostic_helper(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); config = root/'config.json'; seen = []
+            value = dict(code_dir=str(root/'worker'),base_image=str(root/'base'))
+            config.write_text(json.dumps(value))
+            def record(path):
+                seen.append(path); return dict(bytes=1,sha256='a'*64)
+            with patch.object(identity,'record',side_effect=record):
+                identity.identity(root,config,root/'native',root/'rust')
+            self.assertFalse(any(path.name == 'sanitizers.py' for path in seen))
+            config.write_text(json.dumps(dict(value,diagnostic_profile=sanitizers.PROFILE)))
+            seen.clear()
+            with patch.object(identity,'record',side_effect=record):
+                identity.identity(root,config,root/'native',root/'rust')
+            self.assertTrue(any(path.name == 'sanitizers.py' for path in seen))
+
+    def test_diagnostic_export_has_independent_profile_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = failure(); report['diagnostic_profile'] = sanitizers.PROFILE
+            report['guest']['sanitizers'] = dict(environment=sanitizers.ENV,
+                symbolizer=dict(path='/usr/bin/addr2line',sha256='c'*64),binaries={'zone':dict(sha256='d'*64)})
+            directory = Path(temporary)/'evidence'
+            path = normal_world.export_evidence(report,'a'*40,directory)
+            artifact = json.loads(path.read_text())
+            self.assertIn(sanitizers.PROFILE,path.name)
+            self.assertEqual(artifact['diagnostic_profile'],sanitizers.PROFILE)
+            self.assertEqual(artifact['sanitizer_identity']['environment'],sanitizers.ENV)
+            for name in ('diagnostic-files.json','public-summary.json'):
+                self.assertEqual(json.loads((directory/name).read_text())['profile'],sanitizers.PROFILE)
     def test_distinct_seed_checks_environment_and_no_virtual_address_limit(self):
         ordinary = json.loads(guest.build_user_data('a'*32).split('\n', 1)[1])
         selected = json.loads(guest.build_user_data('a'*32, sanitizers.PROFILE).split('\n', 1)[1])
@@ -159,7 +190,7 @@ class Admission(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'bytes changed'): operator.package(output, summary['manifest_sha256'])
 
     def test_partial_publish_policy_and_socket_failures_roll_back_only_matching_additions(self):
-        for failure in ('publish-first', 'publish-middle', 'publish-last', 'apparmor', 'socket'):
+        for failure in ('publish-first', 'publish-middle', 'publish-last', 'sync-first', 'sync-after-link', 'apparmor', 'socket'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
                 output, summary = self.prepared(temporary)
                 root = Path(temporary) / 'host'; root.mkdir()
@@ -171,6 +202,14 @@ class Admission(unittest.TestCase):
                 manifest = json.loads((output / 'manifest.json').read_text())
                 fail_index = {'publish-first':0,'publish-middle':5,'publish-last':len(manifest['files'])-1}.get(failure)
                 failed = False
+                syncs = 0; real_fsync = os.fsync
+                def sync(fd):
+                    nonlocal syncs, failed
+                    syncs += 1
+                    wanted = 1 if failure == 'sync-first' else 2 if failure == 'sync-after-link' else None
+                    if syncs == wanted:
+                        failed = True; raise OSError('injected fsync failure')
+                    return real_fsync(fd)
                 def publish(path, data, mode=0o644):
                     nonlocal published, failed
                     if not failed and published == fail_index:
@@ -194,9 +233,11 @@ class Admission(unittest.TestCase):
                 current = dict(state_dir=str(state),worker_uid=os.getuid(),worker_gid=os.getgid())
                 with patch.object(operator,'PARENT',parent/'diagnostic'), patch.object(operator,'STATE',state/'asan-v1'), \
                      patch.object(operator,'DIAGNOSTIC_CONFIG',config), \
+                     patch.object(operator,'root_operator'), \
                      patch.object(operator,'preconditions',return_value=current), \
                      patch.object(operator,'protected'), patch.object(operator,'publish',side_effect=publish), \
                      patch.object(operator,'run',side_effect=run), patch.object(operator.os,'chown'), \
+                     patch.object(operator.os,'fsync',side_effect=sync), \
                      patch.object(Path,'read_text',read):
                     # Map policy targets into the fake host, never actual /etc.
                     original_targets = operator.expected_targets

@@ -549,9 +549,20 @@ def export_evidence(report, head, directory):
             or not re.fullmatch('[a-f0-9]{32}', report['run_id'])):
         raise ValueError('Native artifact candidate/run identity mismatch')
     passed = report['exit_code'] == 0
+    profile = report.get('diagnostic_profile')
+    if profile:
+        from sanitizers import PROFILE
+        if profile != PROFILE: raise ValueError('Unknown diagnostic artifact profile')
     artifact = dict(schema_version=1, head=head, worker_run_id=report['run_id'],
                     exit_code=report['exit_code'], vm_cleanup_complete=report.get('cleanup_complete'),
                     normal_world=normal, advisory=True, truncated=False)
+    if profile:
+        sanitizer = report.get('guest', {}).get('sanitizers', {})
+        artifact.update(diagnostic_profile=profile, sanitizer_identity={
+            key: sanitizer[key] for key in ('environment', 'symbolizer', 'runtime_libraries', 'binaries',
+                'compile_commands_sha256', 'exclusions', 'optimization_exceptions') if key in sanitizer},
+            worker_implementation_sha256=report.get('implementation_sha256'),
+            payload_sha256=report.get('payload_sha256'))
     artifact = json.loads(json.dumps(artifact))
     detail = artifact['normal_world'].get('failure_evidence', {})
     console = detail.get('console', {})
@@ -576,15 +587,16 @@ def export_evidence(report, head, directory):
         info = os.fstat(directory_fd)
         if info.st_uid != os.geteuid() or info.st_mode & 0o022:
             raise ValueError('Native evidence directory must be owned and nonwritable by others')
-        name = 'normal-world-success.json' if passed else 'normal-world-failure.json'
+        name = 'normal-world-' + (profile + '-' if profile else '') + ('success.json' if passed else 'failure.json')
         write(name, artifact)
         write('diagnostic-files.json', dict(schema_version=1, head=head, files=[name],
-            sha256={name: hashlib.sha256(encoded(artifact) + b'\n').hexdigest()}))
+            sha256={name: hashlib.sha256(encoded(artifact) + b'\n').hexdigest()},
+            **({'profile': profile} if profile else {})))
         condition = detail.get('observation', {}).get('condition')
         allowed = {'world-connection-lost', 'udp-timeout', 'udp-refused', 'udp-malformed-reply',
                    'udp-rejected', 'udp-allocation-exhausted', 'child-exit', 'deadline', 'cancelled', 'console-budget'}
         code = 'native-' + condition if condition in allowed else 'native-nonpass'
-        write('public-summary.json', dict(schema_version=1, head=head, profile='eqemu-worker', status='passed' if passed else 'failed',
+        write('public-summary.json', dict(schema_version=1, head=head, profile=profile or 'eqemu-worker', status='passed' if passed else 'failed',
             step='normal-world', diagnostic_codes=[] if passed else [code], timings_ms=dict(validation=None, restore=None)))
     finally:
         os.close(directory_fd)

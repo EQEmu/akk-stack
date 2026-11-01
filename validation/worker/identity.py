@@ -15,7 +15,11 @@ def identity(root, config_path, native, rust, runtime=None):
                 'validation/inputs.py', 'validation/profile.json', 'validation/runtime-fixture.json',
                 'validation/worker/normal_world.py')
     from runtime import IMPLEMENTATION_FILES
-    worker = IMPLEMENTATION_FILES
+    # The ordinary installed release predates the diagnostic-only helper. Bind
+    # it when admitted/installed, without requiring an ordinary release update.
+    worker = tuple(name for name in IMPLEMENTATION_FILES
+        if name != 'validation/worker/sanitizers.py' or config.get('diagnostic_profile')
+        or (Path(config['code_dir']) / name).exists())
     files = [*(root / name for name in frontend),
              *(Path(config['code_dir']) / name for name in worker), config_path,
              Path('/etc/systemd/system/eqemu-validator' + suffix + '@.service'),

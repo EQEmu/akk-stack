@@ -77,10 +77,28 @@ def protected(path):
 
 def publish(path, data, mode=0o644):
     protected(path.parent)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
-    with os.fdopen(fd, 'wb') as stream:
-        stream.write(data); stream.flush(); os.fsync(stream.fileno())
-    path.chmod(mode)
+    fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
+    temporary = Path(temporary)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data); stream.flush(); os.fsync(stream.fileno())
+        temporary.chmod(mode)
+        # Only complete bytes become a final target, atomically without replacing
+        # anything. A failed write/fsync leaves no partial final policy to adopt.
+        os.link(temporary, path, follow_symlinks=False)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    finally: temporary.unlink(missing_ok=True)
+
+
+def root_operator():
+    path = Path(__file__).absolute()
+    if os.geteuid() != 0: raise ValueError('Real root operator required; do not bypass NoNewPrivs')
+    protected(path.parent)
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise ValueError('Execute only an externally verified root-owned isolated operator copy')
 
 
 def expected_targets(manifest):
@@ -113,6 +131,7 @@ def package(directory, expected):
 
 
 def operate(directory, expected, rollback=False):
+    root_operator()
     manifest, data, targets = package(directory, expected)
     current = preconditions(manifest)
     lock_path = Path(current['state_dir']) / 'worker.lock'
@@ -149,17 +168,19 @@ def operate(directory, expected, rollback=False):
             run(['/usr/bin/systemd-analyze', 'verify', '--generators=no', '--man=no',
                 str(temporary / (NAME + '.socket')), str(temporary / (NAME + '@.service'))])
         if not PARENT.exists():
-            protected(PARENT.parent); PARENT.mkdir(mode=0o755)
+            protected(PARENT.parent); PARENT.mkdir(mode=0o755); PARENT.chmod(0o755)
         protected(PARENT)
-        release.mkdir(mode=0o755)
+        release.mkdir(mode=0o755); release.chmod(0o755)
         for name, target in targets.items():
             if name.startswith('release/'):
                 for parent in reversed(target.parent.relative_to(release).parents):
                     (release / parent).mkdir(mode=0o755, exist_ok=True)
+                    (release / parent).chmod(0o755)
                 target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+                target.parent.chmod(0o755)
             publish(target, data[name], 0o755 if '/scripts/' in str(target) else 0o644)
         # The state is separate; only worker.lock is shared with ordinary runs.
-        STATE.mkdir(mode=0o700); os.chown(STATE, current['worker_uid'], current['worker_gid'])
+        STATE.mkdir(mode=0o700); STATE.chmod(0o700); os.chown(STATE, current['worker_uid'], current['worker_gid'])
         run(['/usr/sbin/apparmor_parser', '--replace', str(targets['apparmor'])])
         run(['/usr/bin/systemctl', 'daemon-reload'])
         run(['/usr/bin/systemctl', 'start', NAME + '.socket'])
@@ -215,9 +236,14 @@ def prepare(output):
         operator_sha256=sha(operator))
     raw = (json.dumps(manifest, indent=2, sort_keys=True) + '\n').encode()
     (output / 'manifest.json').write_bytes(raw)
+    trusted_operator = '/root/eqemu-asan-operator-' + sha(operator) + '.py'
     return dict(package=str(output), manifest_sha256=sha(raw), source_commit=commit,
-        operator_sha256=sha(operator), apply=['python3', str(output / 'operator.py'), 'apply', str(output), sha(raw)],
-        rollback=['python3', str(output / 'operator.py'), 'rollback', str(output), sha(raw)], vm_started=False)
+        operator_sha256=sha(operator),
+        install_operator=['/usr/bin/install', '-o', 'root', '-g', 'root', '-m', '0500', str(output / 'operator.py'), trusted_operator],
+        verify_operator_sha256=sha(operator) + '  ' + trusted_operator,
+        prerequisite='Externally verify the root-owned copy against verify_operator_sha256 before executing it; always Python -I',
+        apply=['/usr/bin/python3', '-I', trusted_operator, 'apply', str(output), sha(raw)],
+        rollback=['/usr/bin/python3', '-I', trusted_operator, 'rollback', str(output), sha(raw)], vm_started=False)
 
 
 def prepare_main():

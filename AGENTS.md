@@ -61,8 +61,9 @@ separate dependency builds/imported libraries and cppunit are uninstrumented.
 Prepare admission data from a clean committed Stack checkout using
 `scripts/prepare-sanitizer-worker --output /private/fresh-package`. It starts no
 VM and prints exact apply/rollback argv plus manifest/operator hashes. A real
-root operator must review those finite assets and run the printed operator
-outside NoNewPrivs. Apply checks original policy/runtime hashes, quiescent
+root operator must review those finite assets, install the operator into the
+printed root-owned path, and externally verify that copy's exact SHA256 before
+running the printed `/usr/bin/python3 -I` command outside NoNewPrivs. Apply checks original policy/runtime hashes, quiescent
 connections and active records, and holds the ordinary worker lock. It adds a
 separate root-owned release, AppArmor profile and socket with the same physical
 resource caps. Diagnostic private state is separate; both sockets share the

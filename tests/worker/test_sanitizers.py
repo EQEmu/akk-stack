@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -176,6 +177,21 @@ class Sanitizers(unittest.TestCase):
 
 
 class Admission(unittest.TestCase):
+    def test_isolated_operator_starts_at_printed_installation_depth_without_local_imports(self):
+        # /tmp/file.py has the same two-parent depth as /root/file.py; no real
+        # root directory, policy admission or VM execution is involved.
+        fd, name = tempfile.mkstemp(prefix='eqemu-asan-operator-',suffix='.py',dir='/tmp')
+        os.close(fd); path = Path(name)
+        try:
+            path.write_bytes(Path(operator.__file__).read_bytes())
+            with tempfile.TemporaryDirectory() as temporary:
+                (Path(temporary)/'argparse.py').write_text('raise RuntimeError("untrusted import executed")')
+                result = subprocess.run(['/usr/bin/python3','-I',str(path),'--help'],cwd=temporary,
+                    capture_output=True,text=True,timeout=5)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertIn('apply,rollback',result.stdout)
+        finally: path.unlink()
+
     def prepared(self, temporary):
         output = Path(temporary) / 'package'
         with patch.object(operator, 'run', side_effect=['a'*40 + '\n', '']):

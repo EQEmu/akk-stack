@@ -26,7 +26,6 @@ STATE = Path('/var/lib/eqemu-validator/asan-v1')
 PROFILE = 'asan-ubsan-native-v1'
 ORDINARY = (CONFIG, Path('/etc/systemd/system/eqemu-validator.socket'),
     Path('/etc/systemd/system/eqemu-validator@.service'), Path('/etc/apparmor.d/eqemu-validator'))
-ROOT = Path(__file__).resolve().parents[2]
 
 
 def sha(data): return hashlib.sha256(data).hexdigest()
@@ -195,11 +194,12 @@ def operate(directory, expected, rollback=False):
 def prepare(output):
     if os.geteuid() == 0: raise ValueError('Prepare as ordinary submitter')
     from staging import FILES
+    root = Path(__file__).resolve().parents[2]
     current = json.loads(load(CONFIG))
     if current['code_dir'] != '/srv/eqemu-validator-code' or current['state_dir'] != '/var/lib/eqemu-validator':
         raise ValueError('Diagnostic operator supports only the inspected installed baseline')
-    commit = run(['/usr/bin/git', '-C', str(ROOT), 'rev-parse', 'HEAD']).strip()
-    if run(['/usr/bin/git', '-C', str(ROOT), 'status', '--porcelain']).strip():
+    commit = run(['/usr/bin/git', '-C', str(root), 'rev-parse', 'HEAD']).strip()
+    if run(['/usr/bin/git', '-C', str(root), 'status', '--porcelain']).strip():
         raise ValueError('Commit/review the trusted Stack release first')
     if output.exists(): raise ValueError('Use a fresh package directory')
     output.mkdir(mode=0o700, parents=True)
@@ -209,11 +209,11 @@ def prepare(output):
     replacements = dict(USER=current['user'], STATE=current['state_dir'], CODE=str(release),
         BASE=current['base_image'], SOCKET=config['socket'],
         SUBMITTER_GROUP=grp.getgrgid(pwd.getpwnam(current['submitter']).pw_gid).gr_name)
-    files = {'release/' + name: load(ROOT / name) for name in FILES}
+    files = {'release/' + name: load(root / name) for name in FILES}
     files['config.json'] = (json.dumps(config, indent=2) + '\n').encode()
     for template, name in (('eqemu-validator.socket', 'worker.socket'),
                            ('eqemu-validator@.service', 'worker.service'), ('apparmor', 'apparmor')):
-        text = (ROOT / 'validation/worker/templates' / template).read_text()
+        text = (root / 'validation/worker/templates' / template).read_text()
         for key, value in replacements.items(): text = text.replace('@' + key + '@', value)
         text = text.replace('/etc/eqemu-validator/config.json', str(DIAGNOSTIC_CONFIG))
         if name == 'apparmor':

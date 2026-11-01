@@ -263,8 +263,8 @@ def source_diagnostics(data):
 def first_sanitizer_diagnostic(data):
     """Keep the first recognizable diagnostic independently of long stack tails.
 
-    Candidate text is advisory, never a verdict. The outer fixture applies its
-    existing secret scrubber to this field with the rest of the result.
+    Candidate text is advisory, never a verdict. Console bytes have already been
+    scrubbed before any excerpt boundaries are selected.
     """
     marker = re.search(rb'ERROR: (?:AddressSanitizer|LeakSanitizer|UndefinedBehaviorSanitizer):|'
                        rb'(?:AddressSanitizer|UndefinedBehaviorSanitizer):DEADLYSIGNAL|runtime error:', data)
@@ -295,7 +295,7 @@ def first_sanitizer_diagnostic(data):
                 truncated=start > 0 or len(text) < len(data[start:].decode(errors='replace')))
 
 
-def failure_snapshot(processes, logs, run_id, start, observation):
+def failure_snapshot(processes, logs, run_id, start, observation, secrets=()):
     """Snapshot before TERM/KILL; later shutdown chatter cannot replace this evidence."""
     evidence = dict(version=1, run_id=run_id, elapsed_ms=max(0, int((time.monotonic()-start)*1000)),
                     observation=dict(observation), processes=[], console={}, console_truncated={},
@@ -313,6 +313,13 @@ def failure_snapshot(processes, logs, run_id, start, observation):
     for path in logs[:2]:
         try:
             data = console_bytes(path)
+            # Scrub complete guest credentials before selecting any excerpt. A
+            # later whole-secret scrub cannot recognize a truncated fragment.
+            # Equal-length masks preserve byte offsets into the original log.
+            for secret in secrets:
+                raw = secret.encode()
+                if raw:
+                    data = data.replace(raw, b'*' * len(raw))
             evidence['console'][path.name] = bounded_text(data.decode(errors='replace'), 2500)
             evidence['console_truncated'][path.name] = len(data) > 2500
             if os.environ.get('ASAN_OPTIONS'):
@@ -456,7 +463,15 @@ def observe(binary_dir, server, control):
     prior = {sig: signal.signal(sig, cancel) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
     result = dict(exit_code=2, cleanup_complete=False, control=control)
     start = time.monotonic()
+    secrets = ()
     try:
+        if os.environ.get('ASAN_OPTIONS'):
+            # These are the two guest-local values created by Runtime.configure,
+            # already readable by the native user. No host credentials enter here.
+            config = json.loads(console_bytes(server / 'eqemu_config.json'))['server']
+            secrets = (config['database']['password'], config['world']['key'])
+            if any(not isinstance(secret, str) or not secret for secret in secrets):
+                raise ValueError('Invalid disposable credential configuration')
         def guard():
             if cancelled:
                 observation['condition'] = 'cancelled'
@@ -540,7 +555,7 @@ def observe(binary_dir, server, control):
     finally:
         try:
             try:
-                before_cleanup = failure_snapshot(processes, logs, run_id, start, observation)
+                before_cleanup = failure_snapshot(processes, logs, run_id, start, observation, secrets)
             except Exception as error:
                 before_cleanup = dict(version=1, run_id=run_id, capture_error=bounded_text(error, 256))
             cleanup = {}
@@ -553,7 +568,7 @@ def observe(binary_dir, server, control):
                         for name, process in zip(('world', 'zone'), processes[:2])]
                     if any(item['returncode'] != 0 for item in result['native_exit_codes']):
                         result.update(exit_code=1, error='Sanitized native process exited nonzero during execution/shutdown')
-                    before_cleanup = failure_snapshot(processes, logs, run_id, start, observation)
+                    before_cleanup = failure_snapshot(processes, logs, run_id, start, observation, secrets)
             except Exception as error:
                 result.update(exit_code=2, cleanup_complete=False, cleanup_error=bounded_json_text(error, 500))
                 cleanup['error'] = result['cleanup_error']

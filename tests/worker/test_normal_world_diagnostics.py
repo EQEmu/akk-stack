@@ -38,14 +38,14 @@ class AdapterDiagnostics(unittest.TestCase):
                 diagnostic='deliberate assertion guest-secret')
             if source:
                 log = root/'zone-console.log'
-                log.write_bytes((b'/fixture.cpp:1: runtime error: fixture guest-secret\n' if sanitizer else b'')
+                log.write_bytes((b'/fixture.cpp:1: runtime error: ' + b'x'*960 + b'guest-secret\n' if sanitizer else b'')
                     + b'EQEMU_NATIVE_DIAGNOSTIC_CONTEXT result=failed guest-secret\n'
                     b'EQEMU_NATIVE_DIAGNOSTIC_STACK_BEGIN\n#0 native_function guest-secret\n'
                     b'EQEMU_NATIVE_DIAGNOSTIC_STACK_END\n' + b'later console\n'*11000)
                 with patch.dict(os.environ, {'ASAN_OPTIONS': 'detect_leaks=1'} if sanitizer else {}):
                     frame['failure_evidence'] = normal.failure_snapshot(
                         [Mock(pid=2000000000, poll=Mock(return_value=None))], [log],
-                        'c'*32, time.monotonic(), dict(condition='udp-timeout'))
+                        'c'*32, time.monotonic(), dict(condition='udp-timeout'), ('guest-secret',) if sanitizer else ())
             if not cleanup:
                 frame['cleanup_diagnostics'] = dict(forced_kill=True,
                     survivors_before_kill=[dict(pid=123, name='python-child', state='S')],

@@ -14,7 +14,7 @@ from test_failure_evidence import failure
 
 
 class SanitizerEvidence(unittest.TestCase):
-    def capture(self, zone, world=b'world console\n', enabled=True):
+    def capture(self, zone, world=b'world console\n', enabled=True, secrets=()):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             paths = [root / name for name in ('world-console.log', 'zone-console.log')]
@@ -22,7 +22,7 @@ class SanitizerEvidence(unittest.TestCase):
                 path.write_bytes(data)
             with patch.dict(os.environ, {'ASAN_OPTIONS': 'detect_leaks=1'} if enabled else {}, clear=True):
                 return normal.failure_snapshot([], paths, 'a'*32, time.monotonic(),
-                    dict(condition='child-exit', last_success_ms=None))
+                    dict(condition='child-exit', last_success_ms=None), secrets)
 
     def test_first_sanitizer_context_and_final_stack_survive_long_middle(self):
         header = b'/source/task.cpp:12:9: runtime error: trusted fixture diagnostic\n'
@@ -76,6 +76,32 @@ class SanitizerEvidence(unittest.TestCase):
         with self.assertRaises(ValueError):
             normal.validate_inserver(first)
         self.assertIsNone(evidence['progress']['active_case'])
+
+    def test_known_credentials_crossing_each_new_excerpt_boundary_are_redacted(self):
+        secret = '0123456789abcdef'*3
+        header = b'runtime error: fixture header\n'
+        cases = [
+            (header[:-1] + b'x'*960 + secret.encode() + b'later\n'*1000, 'text', 'end'),
+            (b'x'*200 + secret.encode() + b'x'*177 + header + b'later\n'*1000, 'text', 'start'),
+            (secret.encode() + b'x'*110 + b'\n' + header + b'later\n'*1000, 'context', 'start'),
+            (b'x'*100 + secret.encode() + b'\x00'*25 + b'\n' + header + b'later\n'*1000, 'context', 'start'),
+        ]
+        for data, field, edge in cases:
+            with self.subTest(field=field, edge=edge, data=data[:20]):
+                evidence = self.capture(data)
+                first = evidence['first_sanitizer_diagnostic']['zone-console.log']
+                text = first[field]
+                fragments = [secret[:n] if edge == 'end' else secret[-n:]
+                    for n in range(1, len(secret))]
+                matches = [part for part in fragments if (text.endswith(part) if edge == 'end' else text.startswith(part))]
+                self.assertTrue(matches, 'Fixture must reproduce a partial credential at the boundary')
+                scrubbed = self.capture(data, secrets=[secret])
+                first = scrubbed['first_sanitizer_diagnostic']['zone-console.log']
+                self.assertEqual(first['offset'], evidence['first_sanitizer_diagnostic']['zone-console.log']['offset'])
+                self.assertIn('*', first[field])
+                self.assertNotIn(max(matches, key=len), first[field])
+                self.assertLessEqual(len(normal.encoded(first['text'])), 1000)
+                self.assertLessEqual(len(normal.encoded(first['context'])), 200)
 
     def test_private_export_keeps_header_and_context_when_shrinking_tail(self):
         evidence = self.capture(b'context\n/source.cpp:1: runtime error: first\n' + b'tail\n'*10000)

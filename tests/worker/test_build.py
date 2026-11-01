@@ -269,11 +269,13 @@ class BuildRuntime(unittest.TestCase):
         self.assertIsInstance(error, candidate_failure)
         self.assertNotIn('guest-secret', json.dumps(error.result))
         source = error.result['failure_evidence']['source_diagnostics']
-        self.assertEqual(source['context'], 'result=failed [redacted]')
-        self.assertEqual(source['stack'], '#0 native_function [redacted]\n')
+        self.assertEqual(source['context'], 'result=failed ************')
+        self.assertEqual(source['stack'], '#0 native_function ************\n')
         self.assertTrue(source['advisory'])
         first = error.result['failure_evidence']['first_sanitizer_diagnostic']['zone-console.log']
-        self.assertIn('runtime error: fixture [redacted]', first['text'])
+        self.assertIn('runtime error:', first['text'])
+        self.assertIn('*', first['text'])
+        self.assertNotIn('guest', first['text'])
         self.assertTrue(first['advisory'])
         self.assertFalse(error.result['failure_evidence']['stack_capture']['captured'])
         detail = dict(version=1, nonce='a'*32, scope='worker-build', exit_code=1,

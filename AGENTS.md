@@ -52,7 +52,7 @@ trusted processes and real pipes/adapters, without candidate execution.
 The retained first release uses `/etc/eqemu-validator/asan-v1.json`; the prepared
 collector release uses `/etc/eqemu-validator/asan-v2.json` only after root admission.
 Both select
-`asan-ubsan-native-v1`, keeps ordinary selection intact, and runs the deliberate
+`asan-ubsan-native-v1`, keep ordinary selection intact, and run the deliberate
 pass/UAF/OOB/UB/leak controls before the unchanged native utility and normal-world
 suites. Expected control failures qualify diagnostics; they are separate from
 the utility/scenario verdict. Sanitizers remain fatal, including exit-time LSan.
@@ -65,7 +65,8 @@ each native console: its first recognizable sanitizer header and following
 context use at most 1000 JSON-encoded bytes, preceding context at most 200.
 Existing 2500-byte console tails remain separate. The 1 MiB input-console,
 12,000-byte failure snapshot, 16 KiB private artifact and transport limits are
-unchanged. Existing scrubbing covers the new fields; they cannot supply a pass
+unchanged. Guest credentials are masked before excerpt selection, preserving byte
+offsets; the outer scrubber remains in place. New fields cannot supply a pass
 or replace process exits, suite finalization or cleanup. Unexported guest console
 heads cannot be recovered after guest cleanup, including from worker serial.
 

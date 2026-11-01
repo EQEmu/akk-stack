@@ -158,9 +158,13 @@ class Readiness(unittest.TestCase):
             self.assertTrue(any(call.args[0] == 102 for call in kill.call_args_list))
             self.assertTrue(any(call.args[1] == normal.signal.SIGKILL for call in kill.call_args_list))
 
-    def run_observer(self, control=None, died=False, interrupt=False, mode="valid", clean=True):
+    def run_observer(self, control=None, died=False, interrupt=False, mode="valid", clean=True, sanitizer=False):
         with tempfile.TemporaryDirectory() as tmp:
             server = Path(tmp)
+            if sanitizer:
+                (server/'eqemu_config.json').write_text(json.dumps({'server': {
+                    'database': {'password': '0123456789abcdef'*3},
+                    'world': {'key': 'fedcba9876543210'*3}}}))
             world, zone = Mock(pid=101), Mock(pid=102)
             world.poll.return_value = 1 if died else None
             zone.poll.return_value = None
@@ -184,6 +188,10 @@ class Readiness(unittest.TestCase):
             reports = []
             def launch(args, **kwargs):
                 env = kwargs['env']
+                if sanitizer:
+                    kwargs['stdout'].write(b'runtime error: ' + b'x'*960
+                        + ('0123456789abcdef'*3).encode() + b' later\n'*1200)
+                    kwargs['stdout'].flush()
                 if Path(args[0]).name == 'world':
                     self.assertFalse(any(key.startswith('EQEMU_INSERVER_TEST_') for key in env))
                     process = world
@@ -222,7 +230,8 @@ class Readiness(unittest.TestCase):
                     replacement.write_bytes(reports[0].read_bytes())
                     replacement.replace(reports[0])
                 return clean
-            with patch.object(normal.os, 'geteuid', return_value=65534), \
+            with patch.dict(os.environ, {'ASAN_OPTIONS': 'detect_leaks=1'} if sanitizer else {}), \
+                    patch.object(normal.os, 'geteuid', return_value=65534), \
                     patch.object(normal.resource, 'setrlimit'), patch.object(normal.Path, 'is_file', return_value=True), \
                     patch.object(normal.subprocess, 'Popen', side_effect=launch) as popen, \
                     patch.object(normal, 'world_connected', side_effect=connections, return_value=True), \
@@ -240,11 +249,23 @@ class Readiness(unittest.TestCase):
                     ports = probe.call_args_list[0].kwargs['used_ports']
                     self.assertIsInstance(ports, set)
                     self.assertTrue(all(call.kwargs['used_ports'] is ports for call in probe.call_args_list))
+            if sanitizer:
+                self.assertNotIn('0123456789', output.getvalue())
+                self.assertNotIn('fedcba9876', output.getvalue())
             lines = output.getvalue().splitlines()
             frames = [json.loads(line.removeprefix('NORMAL_WORLD_RESULT ')) for line in lines
                       if line.startswith('NORMAL_WORLD_RESULT ')]
             self.assertEqual(len(frames), 1)
             return frames[0]
+
+    def test_sanitized_observer_scrubs_config_credentials_before_excerpt_and_print(self):
+        result = self.run_observer(died=True, sanitizer=True)
+        self.assertEqual(result['exit_code'], 1)
+        self.assertTrue(result['cleanup_complete'])
+        first = result['failure_evidence']['first_sanitizer_diagnostic']['world-console.log']
+        self.assertIn('*', first['text'])
+        self.assertNotIn('0123456789', first['text'])
+        self.assertIn('runtime error:', first['text'])
 
     def test_direct_observer_cancellation_keeps_precleanup_state(self):
         result = self.run_observer(mode='observer-cancel')

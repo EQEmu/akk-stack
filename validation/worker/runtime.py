@@ -679,18 +679,23 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
                 os.replace(job / 'serial.log', state / 'last-serial.log')
             if report['cleanup_complete'] and not (job/'profiles').exists():
                 job.rmdir()
-        if active.exists() and read_json(active).get('run_id') == run_id and report['cleanup_complete'] and report.get('profile_retention_complete',True):
-            active.unlink()
         if report.get('profile_artifacts'):
             try:
                 from profile_artifacts import send
                 connection.settimeout(30)
                 with connection.makefile('wb') as stream:
                     send(state/'last-profile',stream)
+                report['profile_client_export_complete']=True
             except Exception as error:
-                report.update(exit_code=2,profile_client_export_error=type(error).__name__)
+                report.update(exit_code=2,profile_client_export_complete=False,profile_client_export_error=type(error).__name__)
+            finally:
+                connection.settimeout(None)
+                try: refresh_profile_receipt(state,run_id,report)
+                except Exception as error:
+                    report.update(exit_code=2,profile_receipt_retention_error=type(error).__name__,profile_retention_complete=False)
                 atomic_json(state/'last-result.json',persisted_report(report))
-            finally: connection.settimeout(None)
+        if active.exists() and read_json(active).get('run_id') == run_id and report['cleanup_complete'] and report.get('profile_retention_complete',True):
+            active.unlink()
         os.close(lock)
     return report
 
@@ -711,6 +716,8 @@ def profile_receipt(report):
         guest_exit_code=code(guest.get('exit_code')),workload_exit_code=code(normal.get('exit_code')),
         native_cleanup_complete=flag(normal.get('cleanup_complete')),database_cleanup_complete=flag(normal.get('database_cleanup')),
         vm_cleanup_complete=flag(report.get('cleanup_complete')),
+        client_export=dict(complete=flag(report.get('profile_client_export_complete')),
+            error_present=bool(report.get('profile_client_export_error'))),
         profiler=dict(mode=profile.get('mode') if profile.get('mode') in ('timeline','heaptrack','perf') else None,
             complete=flag(profile.get('complete')),error_present=bool(profile.get('error')),
             collector_exit_codes=[code(value) for value in collectors] if isinstance(collectors,list) and len(collectors)<=2 else None,
@@ -757,6 +764,16 @@ def retained_profile(state,run_id):
     if not isinstance(receipt,dict) or set(receipt)!=set(profile_receipt({})) or receipt['overall_exit_code']!=metadata['execution_exit_code']:
         raise ValueError('Malformed retained profile result receipt')
     return metadata
+
+
+def refresh_profile_receipt(state,run_id,report):
+    """Atomically attach the final client-transfer outcome to its retained bytes."""
+    metadata=retained_profile(state,run_id)
+    if metadata is None: raise ValueError('Profile identity changed during client export')
+    metadata.update(execution_exit_code=report['exit_code'],result_receipt=profile_receipt(report))
+    if len(json.dumps(metadata).encode())>16384: raise ValueError('Retained profile receipt oversized')
+    atomic_json(state/'last-profile/collection.json',metadata)
+    report['profile_artifacts']=metadata
 
 
 def recover_profile_identity(state,run_id,report):

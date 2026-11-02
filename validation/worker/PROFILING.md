@@ -110,6 +110,9 @@ This receipt includes only finite status codes and flags, with no raw error text
 even after later jobs replace last-result. Last-result stores the bounded
 inventory, not raw bytes. Delete private
 exports when no longer needed; root may remove the retained copy after export.
+The original client transfer has its own completion/error flags, atomically
+updated after that transfer. A later recovery export reports its own exit status
+without rewriting the original execution or transfer outcome.
 
 ## Offline tools
 

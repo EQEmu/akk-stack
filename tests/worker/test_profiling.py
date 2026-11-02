@@ -429,6 +429,49 @@ class ReviewR4ExportRegressions(unittest.TestCase):
         self.assertIn(b'timeline.jsonl',self.client.recv(4096))
 
 
+class ReviewR6ClientExportRegression(unittest.TestCase):
+    def setUp(self):
+        import test_build
+        test_build.BuildRuntime.setUp(self)
+
+    def test_disconnect_receipt_survives_last_result_replacement(self):
+        import test_build
+        from test_normal_world import baseline
+        request=dict(test_build.BuildRuntime.build_request(self),profiling='timeline')
+        self.client.sendall(b'ISO')
+        normal=dict(baseline(),profiling=dict(mode='timeline',complete=True))
+        def simulate(*args):
+            args[-2](12345)
+            sink=artifacts.Sink(args[1].parent/'profiles')
+            sink.accept(dict(name='timeline.jsonl',offset=0,data='YQ=='))
+            args[-1].update(exit_code=0,normal_world=normal,profile_transport=dict(complete=True),completed_checks=list(runtime.BUILD_CHECKS))
+            return 0
+        with patch.object(runtime,'resource_state',return_value={'memory.max':str(6*1024**3)}), \
+                patch.object(runtime,'supervise',side_effect=simulate), \
+                patch.object(artifacts,'send',side_effect=BrokenPipeError('secret text must not enter receipt')):
+            result=runtime.run_vm(self.value,self.server,build=request)
+        self.assertEqual(result['exit_code'],2)
+        receipt=result['profile_artifacts']['result_receipt']
+        self.assertEqual(receipt['overall_exit_code'],2)
+        self.assertEqual(receipt['workload_exit_code'],0)
+        self.assertEqual(receipt['guest_exit_code'],0)
+        self.assertTrue(receipt['transport']['complete'])
+        self.assertFalse(receipt['client_export']['complete'])
+        self.assertTrue(receipt['client_export']['error_present'])
+        self.assertNotIn('secret',json.dumps(receipt))
+        self.assertTrue(receipt['native_cleanup_complete'])
+        self.assertTrue(receipt['database_cleanup_complete'])
+        self.assertTrue(receipt['vm_cleanup_complete'])
+        runtime.atomic_json(self.state/'last-result.json',dict(exit_code=0,scope='unrelated-smoke'))
+        self.client.sendall(json.dumps(dict(version=1,operation='profile-artifacts',run_id=result['run_id'])).encode()+b'\n')
+        exported=runtime.request(self.server,self.value)
+        self.assertEqual(exported['exit_code'],0)
+        self.assertEqual(exported['result_receipt'],receipt)
+        self.assertEqual(exported['workload_exit_code'],0)
+        self.assertEqual(exported['execution_exit_code'],2)
+        self.assertIn(b'timeline.jsonl',self.client.recv(4096))
+
+
 class ReviewR5CollectorRegression(unittest.TestCase):
     def test_failed_collector_cannot_pass_with_readable_analyzed_data(self):
         from unittest.mock import Mock

@@ -342,4 +342,41 @@ class PerfRegressions(unittest.TestCase):
         self.assertEqual(output.strip(),'(1048576, 1048576)')
 
 
+
+
+class RecoveryRegression(unittest.TestCase):
+    def setUp(self):
+        import test_runtime
+        test_runtime.Runtime.setUp(self)
+
+    def test_retained_profiles_remain_identifiable_after_uncertain_cleanup_recovery(self):
+        run_id='d'*32
+        job=self.state/run_id;job.mkdir(mode=0o700);(job/'scratch').mkdir(mode=0o700)
+        sink=artifacts.Sink(job/'profiles')
+        sink.accept(dict(name='timeline.jsonl',offset=0,data=base64.b64encode(b'partial\n').decode()))
+        prior=dict(version=1,run_id=run_id,exit_code=2,cleanup_complete=False)
+        runtime.retain_profiles(job,self.state,run_id,prior)
+        runtime.atomic_json(self.state/'last-result.json',prior)
+        runtime.atomic_json(self.state/'active.json',dict(run_id=run_id,invocation_id='a'*32,control='build',qemu_pid=123))
+        with patch.object(runtime,'service_processes',return_value=[os.getpid()]):
+            self.assertEqual(runtime.cleanup(self.value),0)
+        recovery=json.loads((self.state/'last-result.json').read_text())
+        self.assertEqual(recovery['exit_code'],2)
+        self.assertFalse(recovery['cleanup_complete'])
+        self.assertTrue(recovery['scratch_removed'])
+        self.assertEqual(recovery['profile_artifacts']['run_id'],run_id)
+        self.assertEqual(recovery['profile_artifacts']['files'],artifacts.inventory(self.state/'last-profile'))
+        self.assertTrue(recovery['profile_artifacts']['partial'])
+        output=io.BytesIO();artifacts.send(self.state/'last-profile',output)
+        self.assertNotIn(b'collection.json',output.getvalue())
+        self.assertIn(b'timeline.jsonl',output.getvalue())
+        request=dict(version=1,operation='profile-artifacts',run_id=run_id)
+        self.client.sendall(json.dumps(request).encode()+b'\n')
+        exported=runtime.request(self.server,self.value)
+        self.assertEqual(exported['scope'],'profile-export-only')
+        self.assertFalse(exported['executed'])
+        self.assertEqual(exported['workload_exit_code'],2)
+        self.assertIn(b'timeline.jsonl',self.client.recv(4096))
+
+
 if __name__=='__main__': unittest.main()

@@ -9,6 +9,7 @@ PREFIX = b'EQEMU_PROFILE '
 FILE_LIMIT = 4 * 1024**2
 TOTAL_LIMIT = 16 * 1024**2
 CHUNK = 3072
+INTERNAL = frozenset(('collection.json','collection.tmp'))
 NAMES = frozenset(('timeline.jsonl', 'stages.jsonl', 'metadata.json', 'summary.json', 'preflight.json', 'perf-preflight.analysis',
     'world.heaptrack.raw', 'zone.heaptrack.raw', 'world.heaptrack.txt', 'zone.heaptrack.txt',
     'world.heaptrack.analysis', 'zone.heaptrack.analysis',
@@ -63,7 +64,12 @@ def inventory(directory):
     result = {}
     total = 0
     for path in sorted(Path(directory).iterdir()):
-        if path.name not in NAMES or path.is_symlink() or not path.is_file():
+        if path.is_symlink() or not path.is_file():
+            raise ValueError('Unexpected profile artifact')
+        if path.name in INTERNAL:
+            if path.stat().st_size>16384: raise ValueError('Profile collection identity oversized')
+            continue
+        if path.name not in NAMES:
             raise ValueError('Unexpected profile artifact')
         size = path.stat().st_size; total += size
         if size > FILE_LIMIT or total > TOTAL_LIMIT:
@@ -77,6 +83,7 @@ def send(directory, stream):
     """Finite post-execution export. A disconnected client leaves worker evidence intact."""
     inventory(directory)
     for path in sorted(Path(directory).iterdir()):
+        if path.name in INTERNAL: continue
         with path.open('rb') as source:
             offset = 0
             while block := source.read(CHUNK):

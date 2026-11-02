@@ -272,3 +272,19 @@ class ReviewR2Regressions(unittest.TestCase):
         self.package.chmod(0o777)
         with self.assertRaisesRegex(ValueError,'owner/mode'): self.operation('apply')
         self.assertFalse(self.host.path(release.JOURNAL).exists())
+
+
+class ReviewR3Regression(unittest.TestCase):
+    setUp=Publication.setUp
+    operation=Publication.operation
+
+    def test_verify_and_activate_refuse_drifted_expected_temporary_files(self):
+        self.operation('apply')
+        path=self.host.path(release.RELEASE_ROOT+'/'+'a'*40+'/validation/worker/runtime.py.profiling-tmp')
+        path.write_bytes(b'unrelated bytes')
+        for mode in (0o666,0o644):
+            path.chmod(mode)
+            for action in ('verify','activate'):
+                with self.subTest(mode=mode,action=action),self.assertRaises(ValueError): self.operation(action)
+        self.assertFalse(any(call[1:2]==['start'] for call in self.host.calls))
+        path.unlink();self.operation('verify')

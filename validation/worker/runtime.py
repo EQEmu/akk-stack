@@ -287,6 +287,8 @@ def cleanup(value):
                 report['cleanup_error'] = str(error)[:1000]
             if (job/'profiles').exists():
                 retain_profiles(job,Path(value['state_dir']),job.name,report)
+            else:
+                recover_profile_identity(Path(value['state_dir']),record['run_id'],report)
             atomic_json(Path(value['state_dir']) / 'last-result.json', report)
             if not report['scratch_removed']:
                 return 2  # Retain the active marker and scratch when process absence is uncertain.
@@ -697,14 +699,34 @@ def retain_profiles(job,state,run_id,report):
     """Retain one bounded private collection independently of disposable VM cleanup."""
     from profile_artifacts import inventory
     current=state/'last-profile'
+    metadata=dict(run_id=run_id,files=inventory(job/'profiles'),
+        partial=report.get('guest',{}).get('profile_transport',{}).get('complete') is not True,
+        execution_exit_code=report.get('exit_code',2),
+        retention='one collection, replaced by next profiling run; operator may delete sooner')
+    # Rename the bytes and their identity together. Cleanup receipts may be replaced
+    # later by ExecStopPost without making the collection unidentifiable.
+    atomic_json(job/'profiles/collection.json',metadata)
     if current.exists():
         inventory(current)
         for path in current.iterdir(): path.unlink()
         current.rmdir()
     os.replace(job/'profiles',current)
-    report['profile_artifacts']=dict(run_id=run_id,files=inventory(current),
-        partial=report.get('guest',{}).get('profile_transport',{}).get('complete') is not True,
-        retention='one collection, replaced by next profiling run; operator may delete sooner')
+    report['profile_artifacts']=metadata
+
+
+def recover_profile_identity(state,run_id,report):
+    """Recovery may replace verdict/cleanup fields, never the matching collection ID."""
+    from profile_artifacts import inventory
+    directory=state/'last-profile'
+    if not (directory/'collection.json').is_file(): return
+    try:
+        metadata=read_json(directory/'collection.json')
+        if metadata.get('run_id')!=run_id: return
+        if metadata.get('files')!=inventory(directory): raise ValueError('Retained profile changed')
+        report['profile_artifacts']=dict(metadata,partial=True)
+        report['profile_recovery']=dict(original_execution_exit_code=metadata.get('execution_exit_code'),partial=True)
+    except (OSError,ValueError) as error:
+        report['profile_recovery_error']=type(error).__name__
 
 
 def request(connection, value):

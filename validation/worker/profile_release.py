@@ -281,6 +281,8 @@ def operate(host,directory,expected,operation):
             entries=list(release.rglob('*'))
             if len(entries)>128 or any(p.is_symlink() or not (p.is_file() or p.is_dir()) or p.is_file() and p not in expected_paths or p.is_dir() and p not in expected_dirs for p in entries):
                 raise ValueError('Unknown asset in profiling release')
+        for path,data in targets.items():
+            check_temporary(host,temporary(host.path(path)),data,0o755 if '/scripts/' in path else 0o644)
         if operation=='apply':
             if journal is None:
                 # Refuse collisions before acquiring ownership of any publication.

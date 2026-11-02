@@ -403,9 +403,9 @@ class FailureCapture:
     def sample(self, force=False):
         now = self.elapsed()
         if not force and self.last_sample is not None and now-self.last_sample < 100: return
-        gap = now - (self.last_sample if self.last_sample is not None else 0)
         self.last_sample = now
         for item in self.children:
+            gap = now - (item['last_ms'] if item['last_ms'] is not None else 0)
             item['max_gap_ms'] = max(item['max_gap_ms'], gap)
             try:
                 before = start_ticks(self.proc, item['pid'])
@@ -443,13 +443,13 @@ class FailureCapture:
         final = guest_memory(self.proc)
         first, last = self.baseline['oom_kill'], final['oom_kill']
         middle = (self.failure or final)['oom_kill']
-        counters = (first, middle, last)
-        reset = any(a is not None and b is not None and b < a for a, b in zip(counters, counters[1:]))
+        counters = [value for value in (first, middle, last) if value is not None]
+        reset = any(b < a for a, b in zip(counters, counters[1:]))
         return fit_resources(dict(version=1, processes=self.children,
             guest=dict(baseline=self.baseline, failure=self.failure or final, final=final,
                        delta=None if first is None or last is None or reset else last-first,
                        failure_delta=None if first is None or middle is None or reset else middle-first, reset=reset),
-            kernel=dict(state='not-opened', records=[], truncated=False, additional=0, unparsed=0), truncated=False),
+            kernel=kernel_facts('not-opened'), truncated=False),
             min(1536, 2048-len(encoded(self.pre))-60))
 
 
@@ -473,15 +473,27 @@ def fit_resources(value, budget=1536):
     return value
 
 
+def kernel_facts(state, opened_us=None):
+    # SEEK_END establishes a cursor boundary but does not expose its sequence.
+    # Kernel record timestamps are retained as supplied; wall-clock/sender
+    # attribution is not inferred from these monotonic collector boundaries.
+    return dict(state=state, records=[], truncated=False, additional=0, unparsed=0,
+        scope='observer-through-cleanup', basis='pid-in-cursor-window',
+        boundary='cursor-end' if opened_us is not None else 'unavailable',
+        opened_us=opened_us, closed_us=None, opening_sequence=None)
+
+
 class KernelOOM:
     """Guest-root-only nonblocking kernel window; no raw kernel text escapes."""
     def __init__(self):
         self.fd = None
+        self.opened_us = None
         self.state = 'not-opened'
         if os.geteuid() != 0 or not Path('/opt/eqemu-worker-build-guest').is_file(): return
         try:
             self.fd = os.open('/dev/kmsg', os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
             os.lseek(self.fd, 0, os.SEEK_END)
+            self.opened_us = int(time.monotonic()*1000000)
             self.state = 'ok'
         except OSError as error:
             self.state = capture_state(error)
@@ -491,7 +503,7 @@ class KernelOOM:
         if self.fd is not None: os.close(self.fd); self.fd = None
 
     def finish(self, pids):
-        result = dict(state=self.state, records=[], truncated=False, additional=0, unparsed=0)
+        result = kernel_facts(self.state, self.opened_us)
         try:
             if self.fd is None: return result
             end = time.monotonic()+.05
@@ -530,7 +542,9 @@ class KernelOOM:
                     total_vm_kib=numbers[1], anon_rss_kib=numbers[2], file_rss_kib=numbers[3], shmem_rss_kib=numbers[4]))
             else: result.update(state='budget', truncated=True)
             return result
-        finally: self.close()
+        finally:
+            if self.opened_us is not None: result['closed_us'] = int(time.monotonic()*1000000)
+            self.close()
 
 
 def validate_capture(value):
@@ -566,7 +580,11 @@ def validate_capture(value):
         for key in ('baseline','failure','final'):
             record(guest[key], (*MEM_FIELDS.values(),'oom_kill'), ('state',))
             if guest[key]['state'] not in CAPTURE_STATES: raise ValueError('Invalid guest memory state')
-        kernel = resources['kernel']; record(kernel, ('additional','unparsed'), ('state','records','truncated'))
+        kernel = resources['kernel']; record(kernel, ('additional','unparsed','opened_us','closed_us','opening_sequence'),
+            ('state','records','truncated','scope','basis','boundary'))
+        if (kernel['scope'] != 'observer-through-cleanup' or kernel['basis'] != 'pid-in-cursor-window'
+                or kernel['boundary'] not in ('cursor-end','unavailable')):
+            raise ValueError('Invalid kernel correlation scope')
         if kernel['state'] not in CAPTURE_STATES or not isinstance(kernel['records'], list) or len(kernel['records'])>2:
             raise ValueError('Invalid kernel facts')
         for item in kernel['records']:
@@ -842,7 +860,10 @@ def observe(binary_dir, server, control):
     finally:
         try:
             try:
-                if capture: capture.latch(processes, observation['condition'])
+                if capture:
+                    category = observation['condition']
+                    if result['exit_code'] != 0 and category in ('starting','responsive'): category = 'assertion'
+                    capture.latch(processes, category)
                 before_cleanup = failure_snapshot(processes, logs, run_id, start, observation, secrets, 2048 if capture else 0)
             except Exception as error:
                 before_cleanup = dict(version=1, run_id=run_id, capture_error=bounded_text(error, 256))

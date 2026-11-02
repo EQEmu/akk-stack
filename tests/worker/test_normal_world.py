@@ -239,7 +239,7 @@ class Readiness(unittest.TestCase):
                     patch.object(normal.subprocess, 'Popen', side_effect=launch) as popen, \
                     patch.object(normal, 'world_connected', side_effect=connections, return_value=True), \
                     patch.object(normal, 'probe', side_effect=probes, return_value=True) as probe, \
-                    patch.object(normal, 'cpu_ticks', side_effect=[0, 0, 1, 4]), \
+                    patch.object(normal, 'cpu_ticks', side_effect=[0, 0, 1, 0 if mode == 'activity' else 4]), \
                     patch.object(normal, 'stop', side_effect=cleanup) as stop, \
                     patch.object(normal.time, 'monotonic', side_effect=itertools.count(0, .1)), \
                     patch.object(normal.time, 'sleep'), contextlib.redirect_stdout(output):
@@ -269,6 +269,13 @@ class Readiness(unittest.TestCase):
         self.assertIn('*', first['text'])
         self.assertNotIn('0123456789', first['text'])
         self.assertIn('runtime error:', first['text'])
+
+    def test_sanitized_assertion_latch_is_separate_from_responsiveness(self):
+        for case in (dict(control='assertion'),dict(mode='activity')):
+            with self.subTest(case=case):
+                result=self.run_observer(sanitizer=True,**case)
+                self.assertEqual(result['pre_cleanup_observation']['condition'],'assertion')
+                self.assertEqual(result['failure_evidence']['observation']['condition'],'responsive')
 
     def test_direct_observer_cancellation_keeps_precleanup_state(self):
         result = self.run_observer(mode='observer-cancel')

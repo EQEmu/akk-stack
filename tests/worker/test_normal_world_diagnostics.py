@@ -1,5 +1,6 @@
 """Trusted Python process/adapter probes; no candidate binary or VM execution."""
 import json
+import itertools
 import os
 from pathlib import Path
 import signal
@@ -76,12 +77,29 @@ class FailureCapture(unittest.TestCase):
             self.assertNotIn('guest-secret',json.dumps(resources))
             normal.validate_capture(dict(pre_cleanup_observation=capture.pre, failure_resources=resources))
 
+    def test_failed_samples_measure_coverage_gap_and_missing_counter_does_not_hide_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);child=self.proc_fixture(root)
+            with patch.object(normal.time,'monotonic',return_value=1):
+                capture=normal.FailureCapture(1,proc=root);capture.watch('world',child);capture.sample()
+            for elapsed in (2,3):
+                with patch.object(normal.time,'monotonic',return_value=elapsed), patch.object(normal,'proc_bytes',side_effect=PermissionError()):
+                    capture.sample()
+            with patch.object(normal.time,'monotonic',return_value=4):capture.sample()
+            self.assertEqual(capture.children[0]['samples'],2)
+            self.assertEqual(capture.children[0]['max_gap_ms'],3000)
+            (root/'vmstat').unlink();capture.latch([child],'assertion')
+            (root/'vmstat').write_text('oom_kill 1\n')
+            resources=capture.finish()
+            self.assertTrue(resources['guest']['reset']);self.assertIsNone(resources['guest']['delta'])
+            normal.validate_capture(dict(pre_cleanup_observation=capture.pre,failure_resources=resources))
+
     def kernel(self, blocks, pids=(123,), clock=None):
         collector = normal.KernelOOM.__new__(normal.KernelOOM)
-        collector.fd = 99; collector.state = 'ok'
+        collector.fd = 99; collector.state = 'ok'; collector.opened_us = 1000000
         with patch.object(normal.os,'read',side_effect=blocks), patch.object(normal.os,'close') as close:
             if clock:
-                with patch.object(normal.time,'monotonic',side_effect=clock): result = collector.finish(pids)
+                with patch.object(normal.time,'monotonic',side_effect=itertools.chain(clock,itertools.repeat(clock[-1]))): result = collector.finish(pids)
             else: result = collector.finish(pids)
         close.assert_called_once_with(99)
         return result
@@ -92,6 +110,12 @@ class FailureCapture(unittest.TestCase):
         self.assertEqual(len(result['records']),2); self.assertEqual(result['additional'],1)
         self.assertTrue(result['truncated']); self.assertEqual(result['state'],'would-block')
         self.assertEqual(result['records'][0]['anon_rss_kib'],88)
+        self.assertEqual(result['scope'],'observer-through-cleanup')
+        self.assertEqual(result['basis'],'pid-in-cursor-window')
+        self.assertEqual(result['opened_us'],1000000)
+        self.assertIsNone(result['opening_sequence'])
+        self.assertEqual(result['boundary'],'cursor-end')
+        self.assertGreater(result['closed_us'],result['opened_us'])
         self.assertNotIn('secret',json.dumps(result)); self.assertNotIn('config',json.dumps(result))
         for altered in (record.replace(b'6,12',b'x,12'), record.replace(b'88kB',b'NaNkB'),
                         record.replace(b'12,456',b'999999999999999999999,456')):
@@ -230,7 +254,7 @@ class AdapterDiagnostics(unittest.TestCase):
                     patch.object(normal.os, 'chown'), \
                     patch.object(normal.Path, 'is_file', return_value=True), \
                     patch.object(normal.Path, 'read_text', read):
-                kernel.return_value.finish.return_value = dict(state='denied',records=[],truncated=False,additional=0,unparsed=0)
+                kernel.return_value.finish.return_value = normal.kernel_facts('denied')
                 try:
                     normal.run(build, dict(world_control='assertion'))
                 except Exception as error:
@@ -305,6 +329,14 @@ from unittest.mock import patch
 sys.path.insert(0,sys.argv[1])
 import normal_world as normal
 mode=sys.argv[2]
+real_popen=normal.subprocess.Popen
+launched=[]
+def launch(*args,**kwargs):
+    process=real_popen(*args,**kwargs);launched.append(process)
+    # Both real children are already exited before the guard's first scan.
+    if mode=='dual' and len(launched)==2:
+        for child in launched:child.wait(timeout=5)
+    return process
 with tempfile.TemporaryDirectory() as tmp:
     root=Path(tmp)
     for name in ('world','zone'):
@@ -317,7 +349,7 @@ with tempfile.TemporaryDirectory() as tmp:
         if mode=='late' and name=='world': handler='print("ERROR: LeakSanitizer: fixture late failure",flush=True); raise SystemExit(1)'
         text='#!'+sys.executable+'\nimport os,signal,time\ndef stop(*_):\n    '+handler+'\nsignal.signal(signal.SIGTERM,stop)\n'+action+'\n'
         path=root/name;path.write_text(text);path.chmod(0o700)
-    with patch.object(normal.Path,'is_file',return_value=True), patch.object(normal,'read_observer_secrets',return_value=['secret','key']), patch.object(normal,'world_connected',return_value=False), patch.object(normal,'OBSERVE_SECONDS',.2):
+    with patch.object(normal.subprocess,'Popen',side_effect=launch), patch.object(normal.Path,'is_file',return_value=True), patch.object(normal,'read_observer_secrets',return_value=['secret','key']), patch.object(normal,'world_connected',return_value=False), patch.object(normal,'OBSERVE_SECONDS',.2):
         normal.observe(root,root,None)
 """
         for mode in ('kill','dual','cancel','deadline','escalate','late'):

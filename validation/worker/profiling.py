@@ -244,7 +244,7 @@ class Session:
     def __init__(self, mode, directory, binaries, uid, deadline, metadata):
         if mode not in MODES: raise ValueError('Unknown profiling mode')
         self.directory = Path(directory); self.directory.mkdir(mode=0o755)
-        self.mode = mode; self.uid = uid; self.sampler = None; self.exporter = None
+        self.mode = mode; self.uid = uid; self.sampler = None; self.exporter = None; self.preflight = None
         self.config = dict(mode=mode, directory=str(directory), binaries={k:str(v) for k,v in binaries.items()}, uid=uid, deadline=deadline)
         self.tools = {path:file_identity(path) for path in TOOLS.get(mode,())}
         self.metadata = dict(metadata, mode=mode, tools=self.tools,
@@ -328,8 +328,12 @@ class Session:
                     error=error or 'Profile transport incomplete'
                 if self.exporter.returncode: error=error or 'Profile exporter failed'
         summary=json.loads((self.directory/'summary.json').read_text()) if (self.directory/'summary.json').is_file() else {}
+        if error is None:
+            if not summary.get('processes'): error='No target process sampled'
+            elif summary.get('sampler_complete') is not True: error='Independent sampling deadline reached'
+            elif summary.get('truncated'): error='Profile artifacts truncated'
         return dict(mode=self.mode,complete=error is None and summary.get('sampler_complete') is True and bool(summary.get('processes')) and not summary.get('truncated'),error=error,
-                    sampler=summary,tools=self.tools,analysis_exit_codes=analysis,
+                    sampler=summary,tools=self.tools,analysis_exit_codes=analysis,preflight=self.preflight,
                     lost_samples='not established for perf; inspect bounded report header and tool diagnostics',
                     trace_finalization='may be incomplete after native signal/cleanup; analysis success does not prove a complete trace')
 

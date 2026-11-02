@@ -661,6 +661,12 @@ def run(build, identity):
             if mode=='perf':
                 from profiling import perf_preflight
                 check=perf_preflight(build.WORK/'perf-preflight',account.pw_uid,prefix)
+                from profiling import write_json
+                try: policy=Path('/proc/sys/kernel/perf_event_paranoid').read_text().strip()
+                except OSError: policy=None
+                profiling_session.preflight=dict(exit_code=check,event='task-clock:u',uid=account.pw_uid,perf_event_paranoid=policy)
+                write_json(profiling_session.directory/'preflight.json',profiling_session.preflight)
+                shutil.copyfile(build.WORK/'perf-preflight.log',profiling_session.directory/'perf-preflight.analysis')
                 if check: raise RuntimeError('Requested perf mode unavailable for guest event task-clock:u under native identity')
             profiling_session.stage('shared-memory','started')
         runtime.command('normal-shared-memory', [*prefix, str(build.WORK / 'build/bin/shared_memory')], cwd=server, timeout=180)

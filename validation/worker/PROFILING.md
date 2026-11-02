@@ -50,7 +50,9 @@ using frame-pointer callchains limited to 32 frames and a 64-page mmap buffer.
 Startup before attachment is uncovered. This samples user CPU time, not hardware
 cycles, wall-clock latency or off-CPU activity. It records no system-wide/kernel
 stacks or DWARF stack-memory dumps. Perf headers are finalized before raw export.
-The bounded report includes header/loss diagnostics. Unresolved frames, lost
+The bounded report includes header/loss diagnostics. Guest preflight exit, UID,
+selected event, paranoid policy value and bounded diagnostics are retained even
+when the requested event is denied. Unresolved frames, lost
 samples, throttling and finalization failures remain coverage limitations.
 Hardware counters may be unavailable in KVM even when software events work.
 Missing tools and denied requested events are infrastructure non-pass. No host
@@ -148,14 +150,18 @@ It includes only the reviewed worker/frontend closure, a new independent code
 manifest, config, service/socket, exact AppArmor profile and its operator.
 Preparation runs no setup/staging or installed service commands.
 Review all bytes, the returned package/operator pins and retained preconditions.
+Before root execution, copy the package into a fresh root-owned mode-0700
+directory, preserving no submitter ownership. Verify the copied operator and
+package hashes against the reviewed pins. The operator refuses an unprotected
+package directory; execute its protected copy.
 The following are separate proposed root steps, not authorization to run them:
 
 ```sh
-sha256sum /private/fresh-release/operator.py /private/fresh-release/package.json
-sudo python3 -I /private/fresh-release/operator.py apply --package /private/fresh-release --package-sha256 REVIEWED_SHA256
-sudo python3 -I /private/fresh-release/operator.py verify --package /private/fresh-release --package-sha256 REVIEWED_SHA256
-sudo python3 -I /private/fresh-release/operator.py activate --package /private/fresh-release --package-sha256 REVIEWED_SHA256
-sudo python3 -I /private/fresh-release/operator.py rollback --package /private/fresh-release --package-sha256 REVIEWED_SHA256
+sha256sum /root/reviewed-profile-release/operator.py /root/reviewed-profile-release/package.json
+sudo python3 -I /root/reviewed-profile-release/operator.py apply --package /root/reviewed-profile-release --package-sha256 REVIEWED_SHA256
+sudo python3 -I /root/reviewed-profile-release/operator.py verify --package /root/reviewed-profile-release --package-sha256 REVIEWED_SHA256
+sudo python3 -I /root/reviewed-profile-release/operator.py activate --package /root/reviewed-profile-release --package-sha256 REVIEWED_SHA256
+sudo python3 -I /root/reviewed-profile-release/operator.py rollback --package /root/reviewed-profile-release --package-sha256 REVIEWED_SHA256
 ```
 
 Apply publishes only `/srv/eqemu-validator-profiling/FULL_COMMIT`,

@@ -232,3 +232,43 @@ class PublicationRegressions(unittest.TestCase):
         with patch.object(Path,'open',side_effect=lambda p,*a,**kw:Virtual() if p==path else original(p,*a,**kw),autospec=True):
             self.operation('rollback')
         self.assertTrue(any(call[0]=='/usr/sbin/apparmor_parser' and call[1]=='-R' for call in self.host.calls))
+
+
+class ReviewR2Regressions(unittest.TestCase):
+    setUp=Publication.setUp
+    operation=Publication.operation
+
+    def test_interrupted_journal_never_publishes_truncated_json(self):
+        original=release.publish
+        def interrupt(host,path,data,mode):
+            if path==host.path(release.JOURNAL):
+                pending=release.temporary(path);pending.write_bytes(data[:10]);pending.chmod(0o600);host.chown(pending,0,0)
+                raise RuntimeError('interrupted journal creation')
+            return original(host,path,data,mode)
+        with patch.object(release,'publish',side_effect=interrupt):
+            with self.assertRaisesRegex(RuntimeError,'journal'): self.operation('apply')
+        self.assertFalse(self.host.path(release.JOURNAL).exists())
+        self.operation('rollback');self.operation('rollback')
+        self.operation('apply');self.operation('verify')
+        self.assertEqual(release.retained(self.host),self.before)
+
+    def test_special_unknown_entry_refuses_verify_and_rollback_before_deletion(self):
+        self.operation('apply')
+        code=self.host.path(release.RELEASE_ROOT+'/'+'a'*40)
+        fifo=code/'unknown.fifo';os.mkfifo(fifo)
+        for action in ('verify','rollback'):
+            with self.subTest(action=action),self.assertRaisesRegex(ValueError,'Unknown'): self.operation(action)
+            self.assertTrue(self.host.path(release.CONFIG).exists())
+            self.assertTrue((code/'validation/worker/runtime.py').exists())
+        fifo.unlink()
+        import socket
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(str(code/'unknown.sock'))
+            with self.assertRaisesRegex(ValueError,'Unknown'): self.operation('rollback')
+        (code/'unknown.sock').unlink()
+        self.operation('rollback')
+
+    def test_unprotected_root_package_is_rejected(self):
+        self.package.chmod(0o777)
+        with self.assertRaisesRegex(ValueError,'owner/mode'): self.operation('apply')
+        self.assertFalse(self.host.path(release.JOURNAL).exists())

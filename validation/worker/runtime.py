@@ -703,6 +703,7 @@ def retain_profiles(job,state,run_id,report):
         current.rmdir()
     os.replace(job/'profiles',current)
     report['profile_artifacts']=dict(run_id=run_id,files=inventory(current),
+        partial=report.get('guest',{}).get('profile_transport',{}).get('complete') is not True,
         retention='one collection, replaced by next profiling run; operator may delete sooner')
 
 

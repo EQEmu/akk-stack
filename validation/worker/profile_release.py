@@ -114,8 +114,9 @@ def load_package(directory,expected):
     if (value.get('version')!=1 or set(value.get('files',{}))!=wanted
             or not re.fullmatch('[a-f0-9]{40}',value.get('source_commit',''))): raise ValueError('Package closure mismatch')
     found=set()
+    allowed_dirs={parent for name in wanted|{'package.json'} for parent in (directory/name).parents if parent.is_relative_to(directory)}
     for path in directory.rglob('*'):
-        if path.is_symlink(): raise ValueError('Symlink in profiling package')
+        if path.is_symlink() or not (path.is_file() or path.is_dir()) or path.is_dir() and path not in allowed_dirs: raise ValueError('Symlink in profiling package')
         if path.is_file(): found.add(str(path.relative_to(directory)))
     if found!=wanted|{'package.json'}: raise ValueError('Unknown or omitted profiling package file')
     files={name:read(directory/name) for name in wanted}
@@ -249,6 +250,7 @@ def publish(host,path,data,mode):
 
 
 def operate(host,directory,expected,operation):
+    protected(host,directory,regular=False)
     package,files,config=load_package(directory,expected)
     if read(Path(__file__))!=files['operator.py']: raise ValueError('Use the exact reviewed packaged operator')
     ordinary_path=host.path(ORDINARY);protected(host,ordinary_path)
@@ -264,6 +266,8 @@ def operate(host,directory,expected,operation):
     with shared_lock(host,config):
         quiescent(host)
         before=retained(host)
+        proposed_journal=dict(version=1,package_sha256=expected,retained=before)
+        check_temporary(host,temporary(marker),canonical(proposed_journal),0o600)
         journal=json.loads(read(marker)) if marker.exists() else None
         if journal is not None:
             protected(host,marker,mode=0o600)
@@ -275,17 +279,16 @@ def operate(host,directory,expected,operation):
             expected_paths |= {temporary(path) for path in expected_paths}
             expected_dirs={parent for path in expected_paths for parent in path.parents if parent.is_relative_to(release)}
             entries=list(release.rglob('*'))
-            if len(entries)>128 or any(p.is_symlink() or p.is_file() and p not in expected_paths or p.is_dir() and p not in expected_dirs for p in entries):
+            if len(entries)>128 or any(p.is_symlink() or not (p.is_file() or p.is_dir()) or p.is_file() and p not in expected_paths or p.is_dir() and p not in expected_dirs for p in entries):
                 raise ValueError('Unknown asset in profiling release')
         if operation=='apply':
             if journal is None:
                 # Refuse collisions before acquiring ownership of any publication.
                 if any(host.path(path).exists() or host.path(path).is_symlink() or temporary(host.path(path)).exists() for path in targets) or host.path(STATE).exists() or host.path(config['code_dir']).exists():
                     raise ValueError('Additive publication collision; no replacement allowed')
-                journal=dict(version=1,package_sha256=expected,retained=before)
+                journal=proposed_journal
                 protected(host,marker.parent,regular=False)
-                with marker.open('xb') as stream: stream.write(canonical(journal))
-                marker.chmod(0o600);host.chown(marker,0,0)
+                publish(host,marker,canonical(journal),0o600)
             for path,data in targets.items():
                 dest=host.path(path)
                 missing=[parent for parent in dest.parents if not parent.exists()]
@@ -320,6 +323,7 @@ def operate(host,directory,expected,operation):
         elif operation=='rollback':
             if journal is None:
                 if any(host.path(path).exists() for path in targets): raise ValueError('Unowned profiling assets exist')
+                if temporary(marker).exists(): temporary(marker).unlink()
                 return dict(operation=operation,removed=False,vm_started=False)
             # Only this selection is stopped. The shared lock and quiescence guard
             # prevent removing code used by a connection or any other selection.
@@ -342,6 +346,7 @@ def operate(host,directory,expected,operation):
                 if directory.exists(): directory.rmdir()
             state=host.path(STATE)
             if state.exists() and not any(state.iterdir()): state.rmdir()
+            temporary(marker).unlink(missing_ok=True)
             marker.unlink()
             host.run(['/usr/bin/systemctl','daemon-reload'])
         else: raise ValueError('Unknown profiling publication operation')

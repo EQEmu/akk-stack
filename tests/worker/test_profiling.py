@@ -87,6 +87,7 @@ class Artifacts(unittest.TestCase):
                 with self.assertRaises((ValueError,TypeError)): sink.accept(value)
             with patch.object(artifacts,'FILE_LIMIT',2):
                 with self.assertRaises(ValueError): sink.accept(dict(name='stages.jsonl',offset=0,data='YWJj'))
+            sink.accept(dict(name='timeline.jsonl',offset=len(b'{\"rss_bytes\":123}\n'),data='Yg=='))
             output=io.BytesIO(); artifacts.send(root/'raw',output)
             other=artifacts.Sink(root/'copy')
             for line in output.getvalue().splitlines(): other.accept(json.loads(line.removeprefix(artifacts.PREFIX)))
@@ -208,6 +209,22 @@ class Processes(unittest.TestCase):
                     if child.poll() is None: child.kill(); child.wait(timeout=3)
 
 
+
+    def test_scheduler_pause_is_labeled_as_a_sampling_gap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session=self.session(Path(tmp))
+            process=subprocess.Popen([str(self.binary)])
+            try:
+                time.sleep(.3)
+                session.sampler.send_signal(signal.SIGSTOP)
+                time.sleep(.65)
+                session.sampler.send_signal(signal.SIGCONT)
+                time.sleep(.4)
+                result=session.finish()
+                self.assertGreaterEqual(result['sampler']['gap_count'],1)
+                self.assertGreater(result['sampler']['maximum_gap_seconds'],.6)
+            finally:
+                if process.poll() is None: process.kill();process.wait(timeout=3)
 
 
 class ProfileInputs(unittest.TestCase):

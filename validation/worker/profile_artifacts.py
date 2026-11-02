@@ -9,7 +9,7 @@ PREFIX = b'EQEMU_PROFILE '
 FILE_LIMIT = 4 * 1024**2
 TOTAL_LIMIT = 16 * 1024**2
 CHUNK = 3072
-NAMES = frozenset(('timeline.jsonl', 'stages.jsonl', 'metadata.json', 'summary.json',
+NAMES = frozenset(('timeline.jsonl', 'stages.jsonl', 'metadata.json', 'summary.json', 'preflight.json', 'perf-preflight.analysis',
     'world.heaptrack.raw', 'zone.heaptrack.raw', 'world.heaptrack.txt', 'zone.heaptrack.txt',
     'world.heaptrack.analysis', 'zone.heaptrack.analysis',
     'world.heaptrack.interpret-log', 'zone.heaptrack.interpret-log', 'world.perf.data', 'zone.perf.data',

@@ -549,6 +549,9 @@ class KernelOOM:
 
 def validate_capture(value):
     """Reject raw strings, unknown keys and bool-as-int in advisory telemetry."""
+    if 'capture_error' in value and value['capture_error'] not in ('pre-snapshot-unavailable',
+            'post-snapshot-unavailable','resources-unavailable'):
+        raise ValueError('Invalid capture error')
     def number(n, signed=False):
         if n is not None and (type(n) is not int or not (-2**31 if signed else 0) <= n <= 2**64-1):
             raise ValueError('Invalid failure capture number')
@@ -633,6 +636,15 @@ def failure_snapshot(processes, logs, run_id, start, observation, secrets=(), re
                     evidence.setdefault('first_sanitizer_diagnostic', {})[path.name] = first
             if path.name == 'zone-console.log':
                 evidence['progress'] = case_progress(data, run_id)
+                # JSON escapes can hide a complete secret from the raw-byte
+                # mask. Scrub decoded progress before its own budget boundaries.
+                for event in ('active_case','last_completed_case'):
+                    item = evidence['progress'].get(event)
+                    if not isinstance(item, dict): continue
+                    for field in ('name','diagnostic'):
+                        if field in item:
+                            for secret in secrets:
+                                item[field] = item[field].replace(secret, '*'*len(secret))
                 source = source_diagnostics(data)
                 if source is not None:
                     evidence['source_diagnostics'] = source
@@ -644,6 +656,23 @@ def failure_snapshot(processes, logs, run_id, start, observation, secrets=(), re
         evidence['truncated'] = True
         name = max(evidence['console'], key=lambda name: len(evidence['console'][name]), default=None)
         if name is None or not evidence['console'][name]:
+            # Valid escaped progress can consume several KiB independently of
+            # the tails. Bound its advisory strings without changing suite data.
+            changed = False
+            for event in ('active_case','last_completed_case'):
+                item = evidence['progress'].get(event)
+                if not isinstance(item, dict): continue
+                for field, limit in (('name',128),('diagnostic',512)):
+                    if field in item and len(encoded(item[field])) > limit:
+                        item[field] = bounded_json_text(item[field], limit); changed = True
+            if changed:
+                evidence['progress_truncated'] = True; continue
+            source = evidence.get('source_diagnostics', {})
+            for field, limit in (('stack',1500),('context',250)):
+                if field in source and len(encoded(source[field])) > limit:
+                    source[field] = bounded_json_text(source[field], limit)
+                    source[field + '_truncated'] = True; changed = True
+            if changed: continue
             raise ValueError('Failure metadata exceeds evidence budget')
         evidence['console'][name] = bounded_text(evidence['console'][name], len(evidence['console'][name].encode())//2)
         evidence['console_truncated'][name] = True
@@ -769,6 +798,7 @@ def observe(binary_dir, server, control):
     result = dict(exit_code=2, cleanup_complete=False, control=control)
     start = time.monotonic()
     secrets = ()
+    capture_error = None
     capture = FailureCapture(start) if os.environ.get('ASAN_OPTIONS') else None
     try:
         if os.environ.get('ASAN_OPTIONS'):
@@ -864,9 +894,10 @@ def observe(binary_dir, server, control):
                     category = observation['condition']
                     if result['exit_code'] != 0 and category in ('starting','responsive'): category = 'assertion'
                     capture.latch(processes, category)
-                before_cleanup = failure_snapshot(processes, logs, run_id, start, observation, secrets, 2048 if capture else 0)
+                before_cleanup = failure_snapshot(processes, logs, run_id, start, observation, secrets, 2176 if capture else 0)
             except Exception as error:
-                before_cleanup = dict(version=1, run_id=run_id, capture_error=bounded_text(error, 256))
+                capture_error = 'pre-snapshot-unavailable'
+                before_cleanup = dict(version=1, run_id=run_id, capture_error=capture_error)
             cleanup = {}
             try:
                 result['cleanup_complete'] = stop(processes, diagnostics=cleanup)
@@ -877,10 +908,13 @@ def observe(binary_dir, server, control):
                         for name, process in zip(('world', 'zone'), processes[:2])]
                     if any(item['returncode'] != 0 for item in result['native_exit_codes']):
                         result.update(exit_code=1, error='Sanitized native process exited nonzero during execution/shutdown')
-                    before_cleanup = failure_snapshot(processes, logs, run_id, start, observation, secrets, 2048)
             except Exception as error:
                 result.update(exit_code=2, cleanup_complete=False, cleanup_error=bounded_json_text(error, 500))
                 cleanup['error'] = result['cleanup_error']
+            # Evidence capture is advisory and cannot overwrite stop's result.
+            if capture:
+                try: before_cleanup = failure_snapshot(processes, logs, run_id, start, observation, secrets, 2176)
+                except Exception: capture_error = 'post-snapshot-unavailable'
             if result['cleanup_complete'] is not True:
                 result['cleanup_diagnostics'] = cleanup
             if suite_snapshot is not None:
@@ -901,8 +935,16 @@ def observe(binary_dir, server, control):
         if result['exit_code'] != 0:
             result['failure_evidence'] = before_cleanup
             if capture:
-                result.update(pre_cleanup_observation=capture.pre, failure_resources=capture.finish())
-                validate_capture(result)
+                result['pre_cleanup_observation'] = capture.pre
+                try:
+                    result['failure_resources'] = capture.finish()
+                    validate_capture(result)
+                except Exception:
+                    result.pop('failure_resources', None)
+                    try: validate_capture(result)
+                    except Exception: result.pop('pre_cleanup_observation', None)
+                    capture_error = 'resources-unavailable'
+            if capture_error: result['capture_error'] = capture_error
     print('NORMAL_WORLD_RESULT ' + json.dumps(result, separators=(',', ':')), flush=True)
 
 

@@ -217,6 +217,8 @@ class Readiness(unittest.TestCase):
                 children.append(process)
                 return process
             def cleanup(processes, *, diagnostics):
+                if mode == 'sanitized-clean':
+                    for process in processes: process.poll.return_value = 0
                 if mode == 'cleanup-error':
                     raise RuntimeError('simulated stop failure')
                 if mode == 'progress-hang':
@@ -276,6 +278,27 @@ class Readiness(unittest.TestCase):
                 result=self.run_observer(sanitizer=True,**case)
                 self.assertEqual(result['pre_cleanup_observation']['condition'],'assertion')
                 self.assertEqual(result['failure_evidence']['observation']['condition'],'responsive')
+
+    def test_advisory_snapshot_errors_cannot_replace_native_cleanup_or_exit(self):
+        with patch.object(normal,'failure_snapshot',side_effect=RuntimeError('guest-secret')):
+            result=self.run_observer(died=True,sanitizer=True)
+        self.assertTrue(result['cleanup_complete'])
+        self.assertEqual(result['exit_code'],1)
+        self.assertEqual(result['native_exit_codes'][0]['returncode'],1)
+        self.assertEqual(result['capture_error'],'post-snapshot-unavailable')
+        self.assertNotIn('guest-secret',json.dumps(result))
+        with patch.object(normal.FailureCapture,'finish',side_effect=ValueError('guest-secret')):
+            result=self.run_observer(died=True,sanitizer=True)
+        self.assertTrue(result['cleanup_complete'])
+        self.assertEqual(result['pre_cleanup_observation']['first_observed_exited'],'world')
+        self.assertEqual(result['capture_error'],'resources-unavailable')
+        self.assertNotIn('failure_resources',result)
+        with patch.object(normal,'failure_snapshot',side_effect=RuntimeError('guest-secret')):
+            result=self.run_observer(mode='sanitized-clean',sanitizer=True)
+        self.assertEqual(result['exit_code'],0)
+        self.assertTrue(result['cleanup_complete'])
+        self.assertNotIn('capture_error',result)
+        self.assertNotIn('pre_cleanup_observation',result)
 
     def test_direct_observer_cancellation_keeps_precleanup_state(self):
         result = self.run_observer(mode='observer-cancel')

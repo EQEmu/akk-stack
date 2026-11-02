@@ -63,6 +63,43 @@ class SanitizerEvidence(unittest.TestCase):
             self.assertEqual(actual['failure_resources'],metadata['failure_resources'])
             self.assertLessEqual(artifact.stat().st_size,16384)
 
+    def test_escaped_progress_and_stack_fit_reserved_budget_without_losing_headers(self):
+        run='a'*32;name='\U0001f600'*64;diagnostic='\U0001f600'*256
+        events=[dict(version=1,run_id=run,event='case-start',name=name,elapsed_ms=1),
+                dict(version=1,run_id=run,event='case-end',name=name,elapsed_ms=2,passed=False,diagnostic=diagnostic),
+                dict(version=1,run_id=run,event='case-start',name='\U0001f601'*64,elapsed_ms=3)]
+        data=b'context\n/source.cpp:1: runtime error: fixture\n'+b'x'*1200+b'\n'
+        data+=b'EQEMU_NATIVE_DIAGNOSTIC_CONTEXT '+('\U0001f600'*200).encode()+b'\n'
+        data+=b'EQEMU_NATIVE_DIAGNOSTIC_STACK_BEGIN\n'+('\U0001f600'*1000).encode()+b'\nEQEMU_NATIVE_DIAGNOSTIC_STACK_END\n'
+        data+=b''.join(b'EQEMU_INSERVER_PROGRESS '+normal.encoded(event)+b'\n' for event in events)
+        with tempfile.TemporaryDirectory() as tmp:
+            paths=[Path(tmp)/name for name in ('world-console.log','zone-console.log')]
+            for path in paths:path.write_bytes(data)
+            with patch.dict(os.environ,{'ASAN_OPTIONS':'detect_leaks=1'}):
+                evidence=normal.failure_snapshot([],paths,run,time.monotonic(),dict(condition='deadline'),reserved=2176)
+        self.assertLessEqual(len(normal.encoded(evidence)),12000-2176)
+        self.assertEqual(len(evidence['first_sanitizer_diagnostic']),2)
+        self.assertTrue(evidence['progress_truncated'])
+        self.assertFalse(evidence['progress']['last_completed_case']['passed'])
+
+    def test_encoded_progress_credentials_are_masked_after_json_decode_before_metadata_clipping(self):
+        secret='0123456789abcdef'*3;run='a'*32;name='\U0001f600'*16+secret
+        events=[dict(version=1,run_id=run,event='case-start',name=name,elapsed_ms=1),
+                dict(version=1,run_id=run,event='case-end',name=name,elapsed_ms=2,passed=False,diagnostic='\U0001f600'*256),
+                dict(version=1,run_id=run,event='case-start',name=name,elapsed_ms=3)]
+        escaped=''.join('\\u%04x'%ord(c) for c in secret)
+        data=b'\x00'*128+b'\nruntime error: first\n'+b'x'*1200+b'\nEQEMU_NATIVE_DIAGNOSTIC_CONTEXT '+b'c'*498+b'\n'
+        data+=b'EQEMU_NATIVE_DIAGNOSTIC_STACK_BEGIN\n'+b's'*2996+b'\nEQEMU_NATIVE_DIAGNOSTIC_STACK_END\n'
+        data+=b''.join(b'EQEMU_INSERVER_PROGRESS '+json.dumps(event).replace(secret,escaped).encode()+b'\n' for event in events)
+        with tempfile.TemporaryDirectory() as tmp:
+            paths=[Path(tmp)/name for name in ('world-console.log','zone-console.log')]
+            for path in paths:path.write_bytes(data)
+            with patch.dict(os.environ,{'ASAN_OPTIONS':'detect_leaks=1'}):
+                evidence=normal.failure_snapshot([],paths,run,time.monotonic(),dict(condition='deadline'),(secret,),2176)
+        self.assertTrue(evidence['progress_truncated'])
+        self.assertNotIn(secret[-16:],json.dumps(evidence))
+        self.assertIn('*',evidence['progress']['last_completed_case']['name'])
+
     def test_first_sanitizer_context_and_final_stack_survive_long_middle(self):
         header = b'/source/task.cpp:12:9: runtime error: trusted fixture diagnostic\n'
         zone = (b'earlier context\n' + header + b'    #0 first_source /source/task.cpp:12\n'

@@ -338,7 +338,18 @@ def operate(host,directory,expected,operation):
                 return dict(operation=operation,removed=False,vm_started=False)
             # Only this selection is stopped. The shared lock and quiescence guard
             # prevent removing code used by a connection or any other selection.
-            host.run(['/usr/bin/systemctl','stop',SOCKET])
+            rows=host.run(['/usr/bin/systemctl','list-units','--all','--no-legend','--plain','--type=socket',SOCKET]).splitlines()
+            if rows:
+                fields=rows[0].split()
+                if len(rows)!=1 or len(fields)<4 or fields[0]!=SOCKET:
+                    raise ValueError('Uncertain profiling socket state')
+                load,active,sub=fields[1:4]
+                if load=='loaded' and active=='active' and sub in ('listening','running'):
+                    if not host.path('/etc/systemd/system/'+SOCKET).is_file():
+                        raise ValueError('Loaded profiling socket has no owned unit file')
+                    host.run(['/usr/bin/systemctl','stop',SOCKET])
+                elif not (load in ('loaded','not-found') and (active,sub) in (('inactive','dead'),('failed','failed'))):
+                    raise ValueError('Uncertain profiling socket state')
             # Policy may never have been loaded during a partial publication.
             profiles=host.path('/sys/kernel/security/apparmor/profiles')
             if profiles.exists() and 'eqemu-validator-profiling (enforce)' in read_virtual(profiles).decode().splitlines():

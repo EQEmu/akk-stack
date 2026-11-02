@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import pwd
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -20,7 +21,7 @@ import test_runtime
 
 class FakeHost(release.Host):
     def __init__(self,root):
-        super().__init__(root);self.owners={};self.calls=[];self.active=False;self.fail_after=None;self.writes=0
+        super().__init__(root);self.owners={};self.calls=[];self.active=False;self.fail_after=None;self.writes=0;self.socket_loaded=False
     def info(self,path):
         info=list(path.lstat()); info[4],info[5]=self.owners.get(str(path),(0,0))
         return os.stat_result(info)
@@ -29,7 +30,15 @@ class FakeHost(release.Host):
         if self.fail_after==self.writes: raise RuntimeError('injected publication interruption')
     def run(self,args):
         self.calls.append(args)
-        if args[1]=='list-units': return 'eqemu-validator@1.service loaded active running\n' if self.active else ''
+        if args[1]=='list-units':
+            if '--type=socket' in args:
+                return release.SOCKET+' loaded active listening\n' if self.socket_loaded else ''
+            return 'eqemu-validator@1.service loaded active running\n' if self.active else ''
+        if args[1]=='start' and args[2]==release.SOCKET: self.socket_loaded=True
+        if args[1]=='stop' and args[2]==release.SOCKET:
+            if not self.socket_loaded and not self.path('/etc/systemd/system/'+release.SOCKET).exists():
+                raise subprocess.CalledProcessError(5,args)
+            self.socket_loaded=False
         return ''
     def processes(self): pass
     def account(self,name):
@@ -106,6 +115,32 @@ class Publication(unittest.TestCase):
         self.operation('rollback');self.operation('rollback')
         self.assertEqual(release.retained(self.host),self.before)
         self.operation('apply');self.operation('verify')
+
+    def test_rollback_before_socket_publication_skips_confirmed_absence_and_repeats(self):
+        self.host.fail_after=5
+        with self.assertRaises(RuntimeError): self.operation('apply')
+        self.host.fail_after=None
+        self.assertFalse(self.host.path('/etc/systemd/system/'+release.SOCKET).exists())
+        self.operation('rollback');self.operation('rollback')
+        self.assertFalse(any(call[1:3]==['stop',release.SOCKET] for call in self.host.calls))
+        self.assertFalse(self.host.path(release.JOURNAL).exists())
+
+    def test_rollback_stops_owned_loaded_socket_and_refuses_uncertain_query_or_stop_error(self):
+        self.operation('apply');self.operation('activate')
+        original=self.host.run
+        def uncertain(args):
+            if '--type=socket' in args: return release.SOCKET+' loaded activating start\n'
+            return original(args)
+        with patch.object(self.host,'run',side_effect=uncertain):
+            with self.assertRaisesRegex(ValueError,'Uncertain'): self.operation('rollback')
+        def stop_error(args):
+            if args[1:3]==['stop',release.SOCKET]: raise subprocess.CalledProcessError(1,args)
+            return original(args)
+        with patch.object(self.host,'run',side_effect=stop_error):
+            with self.assertRaises(subprocess.CalledProcessError): self.operation('rollback')
+        self.assertTrue(self.host.path(release.CONFIG).exists())
+        self.operation('rollback')
+        self.assertTrue(any(call[1:3]==['stop',release.SOCKET] for call in self.host.calls))
 
     def test_collision_drift_unknown_source_and_tampering_refuse(self):
         collision=self.host.path(release.CONFIG);collision.write_bytes(b'not owned')

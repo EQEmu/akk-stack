@@ -286,7 +286,15 @@ def cleanup(value):
             except (OSError, ValueError, CleanupError) as error:
                 report['cleanup_error'] = str(error)[:1000]
             if (job/'profiles').exists():
+                # A client transfer cannot have started before this directory move.
+                report.update(profile_client_export_complete=False,profile_client_export_error='InterruptedBeforeTransfer',
+                              profile_retention_complete=False)
                 retain_profiles(job,Path(value['state_dir']),job.name,report)
+                try:
+                    refresh_profile_receipt(Path(value['state_dir']),job.name,report)
+                    report['profile_retention_complete']=True
+                except (OSError,ValueError) as error:
+                    report['profile_recovery_error']=type(error).__name__
             else:
                 recover_profile_identity(Path(value['state_dir']),record['run_id'],report)
             atomic_json(Path(value['state_dir']) / 'last-result.json', report)

@@ -603,6 +603,28 @@ class ReviewR6ClientExportRegression(unittest.TestCase):
         self.assertEqual(exported['result_receipt'],receipt)
         self.assertIn(b'timeline.jsonl',self.client.recv(4096))
 
+    def test_interruption_before_retention_move_finishes_nonpass_receipt_or_keeps_active(self):
+        run_id='d'*32
+        job=self.state/run_id;job.mkdir();(job/'scratch').mkdir()
+        sink=artifacts.Sink(job/'profiles');sink.accept(dict(name='timeline.jsonl',offset=0,data='YQ=='))
+        runtime.atomic_json(self.state/'active.json',dict(run_id=run_id,invocation_id='a'*32,control='build',qemu_pid=123))
+        with patch.object(runtime,'service_processes',return_value=[os.getpid()]), \
+                patch.object(runtime,'refresh_profile_receipt',side_effect=OSError('write unavailable')):
+            self.assertEqual(runtime.cleanup(self.value),2)
+        self.assertTrue((self.state/'active.json').exists())
+        pending=runtime.retained_profile(self.state,run_id)
+        self.assertEqual(pending['receipt_finalization'],'pending')
+        self.assertEqual(pending['execution_exit_code'],2)
+        with patch.object(runtime,'service_processes',return_value=[os.getpid()]):
+            self.assertEqual(runtime.cleanup(self.value),0)
+        self.assertFalse((self.state/'active.json').exists())
+        complete=runtime.retained_profile(self.state,run_id)
+        self.assertEqual(complete['receipt_finalization'],'complete')
+        self.assertEqual(complete['execution_exit_code'],2)
+        self.assertIsNone(complete['result_receipt']['workload_exit_code'])
+        self.assertFalse(complete['result_receipt']['client_export']['complete'])
+        self.assertTrue(complete['result_receipt']['client_export']['error_present'])
+
 
 class ReviewR8CollectorShutdownRegression(unittest.TestCase):
     def test_real_same_group_collector_exits_on_target_death_before_group_cleanup(self):

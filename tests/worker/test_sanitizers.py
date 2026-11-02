@@ -357,13 +357,23 @@ class Admission(unittest.TestCase):
                     with self.assertRaises(BlockingIOError): operator.operate(output, summary['manifest_sha256'])
                     publish.assert_not_called(); run.assert_not_called()
             finally: os.close(fd)
-            lock.chmod(0o644)
-            with patch.object(operator, 'root_operator'), \
-                    patch.object(operator, 'preconditions', return_value=current), \
-                    patch.object(operator, 'publish') as publish, patch.object(operator, 'run') as run:
-                with self.assertRaisesRegex(ValueError, 'lock ownership/mode'):
-                    operator.operate(output, summary['manifest_sha256'])
-                publish.assert_not_called(); run.assert_not_called()
+            for mode in (0o644, 0o400, 0o200, 0o000):
+                lock.chmod(mode)
+                with self.subTest(mode=oct(mode)), patch.object(operator, 'root_operator'), \
+                        patch.object(operator, 'preconditions', return_value=current), \
+                        patch.object(operator, 'publish') as publish, patch.object(operator, 'run') as run:
+                    # Real root can open these modes; fixture retains a real lock
+                    # descriptor so the actual fstat predicate sees each mode.
+                    original_open = os.open
+                    opened = original_open(lock, os.O_PATH)
+                    def open_lock(path, flags, *args, **kwargs):
+                        return os.dup(opened) if Path(path) == lock else original_open(path, flags, *args, **kwargs)
+                    try:
+                        with patch.object(operator.os, 'open', side_effect=open_lock):
+                            with self.assertRaisesRegex(ValueError, 'lock ownership/mode'):
+                                operator.operate(output, summary['manifest_sha256'])
+                    finally: os.close(opened)
+                    publish.assert_not_called(); run.assert_not_called()
 
     def test_partial_publish_policy_and_socket_failures_roll_back_only_matching_additions(self):
         for failure in ('publish-first', 'publish-middle', 'publish-last', 'sync-first', 'sync-after-link', 'apparmor', 'socket'):

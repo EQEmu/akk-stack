@@ -550,7 +550,8 @@ class KernelOOM:
 def validate_capture(value):
     """Reject raw strings, unknown keys and bool-as-int in advisory telemetry."""
     if 'capture_error' in value and value['capture_error'] not in ('pre-snapshot-unavailable',
-            'post-snapshot-unavailable','resources-unavailable'):
+            'post-snapshot-unavailable','resources-unavailable','root-capture-unavailable',
+            'kernel-init-unavailable','kernel-merge-unavailable','kernel-close-unavailable'):
         raise ValueError('Invalid capture error')
     def number(n, signed=False):
         if n is not None and (type(n) is not int or not (-2**31 if signed else 0) <= n <= 2**64-1):
@@ -1045,6 +1046,7 @@ def run(build, identity):
     result = None
     error = None
     kernel = None
+    capture_error = None
     binaries = {name: build.sha(build.WORK / 'build/bin' / name) for name in ('world', 'zone', 'shared_memory')}
     try:
         MEDIA.mkdir()
@@ -1087,7 +1089,9 @@ def run(build, identity):
                     raise RuntimeError('Duplicate normal-world readiness phase')
                 ready = True
                 build.emit({'kind': 'stage', 'name': 'normal-world-ready', 'state': 'started'})
-        if credential_snapshot is not None: kernel = KernelOOM()
+        if credential_snapshot is not None:
+            try: kernel = KernelOOM()
+            except Exception: capture_error = 'kernel-init-unavailable'
         with (observer_credential_pipe(credential_snapshot) if credential_snapshot is not None
               else nullcontext()) as credentials:
             output = runtime.command('normal-world', [*prefix, '/usr/bin/python3', '/opt/normal_world.py',
@@ -1099,12 +1103,33 @@ def run(build, identity):
         if len(frames) != 1:
             raise RuntimeError('Missing/duplicate normal-world assertion completion')
         result = json.loads(runtime.scrub(json.dumps(frames[0], separators=(',', ':'))))
-        validate_capture(result)
-        if kernel and isinstance(result.get('failure_resources'), dict):
-            resources = result['failure_resources']
-            resources['kernel'] = kernel.finish([p['pid'] for p in resources['processes']])
-            result['failure_resources'] = fit_resources(resources, min(1536, 2048-len(encoded(result.get('pre_cleanup_observation')))-60))
-            validate_capture(result)
+        if isinstance(result, dict):
+            try: validate_capture(result)
+            except Exception:
+                capture_error = capture_error or 'root-capture-unavailable'
+                # Retain independently valid observer facts, never malformed raw
+                # telemetry. Resource identities must still match a retained latch.
+                retained = {}
+                for field in ('pre_cleanup_observation', 'failure_resources'):
+                    if field not in result: continue
+                    candidate = dict(retained, **{field: result[field]})
+                    try: validate_capture(candidate)
+                    except Exception: continue
+                    retained = candidate
+                for field in ('pre_cleanup_observation', 'failure_resources', 'capture_error'):
+                    result.pop(field, None)
+                result.update(retained)
+            if kernel is not None and isinstance(result.get('failure_resources'), dict):
+                try:
+                    # Publish only after the complete merge is bounded and valid.
+                    merged = dict(result)
+                    resources = dict(result['failure_resources'])
+                    resources['kernel'] = kernel.finish([p['pid'] for p in resources['processes']])
+                    merged['failure_resources'] = fit_resources(resources,
+                        min(1536, 2048-len(encoded(result.get('pre_cleanup_observation')))-60))
+                    validate_capture(merged)
+                except Exception: capture_error = capture_error or 'kernel-merge-unavailable'
+                else: result = merged
         if (not isinstance(result, dict) or type(result.get('exit_code')) is not int
                 or result['exit_code'] not in (0, 1, 2) or result.get('cleanup_complete') is not True):
             # Keep the observer's own cleanup evidence. Host VM destruction is a
@@ -1134,7 +1159,10 @@ def run(build, identity):
     except Exception as exc:
         error = runtime.scrub(str(exc))[-3000:]
     finally:
-        if kernel is not None: kernel.close()
+        try:
+            if kernel is not None: kernel.close()
+        except Exception: capture_error = capture_error or 'kernel-close-unavailable'
+        # Advisory descriptor failures cannot prevent authoritative cleanup.
         try:
             clean = runtime.cleanup()
         except Exception as exc:
@@ -1145,6 +1173,8 @@ def run(build, identity):
                 signal.signal(sig, handler)
     if isinstance(result, dict):
         result.update(fixture_manifest_sha256=fixture['manifest_sha256'], binaries=binaries, database_cleanup=clean)
+        if capture_error and result.get('exit_code') != 0:
+            result['capture_error'] = capture_error
         if error:
             result['adapter_error'] = bounded_json_text(error, 1000)
     if error or not clean or result is None:

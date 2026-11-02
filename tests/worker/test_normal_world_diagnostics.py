@@ -155,7 +155,7 @@ class FailureCapture(unittest.TestCase):
 
 
 class AdapterDiagnostics(unittest.TestCase):
-    def replay(self, cleanup, large=False, database_error=False, cancel_root=False, source=False, sanitizer=False, changed_config=False):
+    def replay(self, cleanup, large=False, database_error=False, cancel_root=False, source=False, sanitizer=False, changed_config=False, kernel_error=None, successful=False, merge_error=None, malformed_capture=False):
         """Reach run's real command/pipe/scrubbing seam with a harmless Python producer."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -187,7 +187,8 @@ class AdapterDiagnostics(unittest.TestCase):
                 capture = normal.FailureCapture(time.monotonic(),proc=root/'absent-proc')
                 for name,pid in (('world',123),('zone',124)): capture.watch(name,Mock(pid=pid))
                 capture.latch([], 'child-exit', [None,-9])
-                frame.update(pre_cleanup_observation=capture.pre,failure_resources=capture.finish())
+                frame.update(pre_cleanup_observation=capture.pre,failure_resources=capture.finish(),
+                    native_exit_codes=[dict(name='world', returncode=0), dict(name='zone', returncode=-9)])
             if not cleanup:
                 frame['cleanup_diagnostics'] = dict(forced_kill=True,
                     survivors_before_kill=[dict(pid=123, name='python-child', state='S')],
@@ -197,6 +198,12 @@ class AdapterDiagnostics(unittest.TestCase):
                 frame['inserver_tests'].update(selected=32, started=32, completed=32, failed=32)
                 frame['inserver_tests']['tests'] = [dict(name='case-'+str(n), passed=False,
                     diagnostic='deliberate assertion guest-secret ' + 'x'*220) for n in range(32)]
+            if malformed_capture:
+                frame['failure_resources']['kernel']['state'] = 'guest-secret /private/path'
+            if successful:
+                frame = baseline()
+                for key in ('fixture_manifest_sha256', 'binaries', 'database_cleanup'): del frame[key]
+            cleanup_calls = []
             output = 'NORMAL_WORLD_READY\nNORMAL_WORLD_RESULT ' + json.dumps(frame) + '\n'
             class ReplayRuntime(actor_runtime.Runtime):
                 def guard(self):
@@ -239,6 +246,7 @@ class AdapterDiagnostics(unittest.TestCase):
                         on_line=kwargs['on_line'], timeout=10,
                         **({'stdin': kwargs['stdin']} if 'stdin' in kwargs else {}))
                 def cleanup(self):
+                    cleanup_calls.append(True)
                     if database_error: raise RuntimeError('database cleanup guest-secret failed')
                     return True
             original_read = Path.read_text
@@ -246,7 +254,10 @@ class AdapterDiagnostics(unittest.TestCase):
                 if str(path) == '/opt/runtime-fixture.json':
                     return '{"manifest_sha256":"'+'a'*64+'"}'
                 return original_read(path, *args, **kwargs)
-            with patch.object(normal, 'KernelOOM') as kernel, \
+            validate_capture = normal.validate_capture
+            with patch.object(normal, 'fit_resources', wraps=normal.fit_resources) as fit, \
+                    patch.object(normal, 'validate_capture', wraps=validate_capture) as validate, \
+                    patch.object(normal, 'KernelOOM') as kernel, \
                     patch.object(actor_runtime, 'Runtime', ReplayRuntime), \
                     patch.object(actor_runtime, 'ROOT', root/'runtime'), \
                     patch.object(actor_runtime, 'MEDIA', root/'media'), \
@@ -255,14 +266,86 @@ class AdapterDiagnostics(unittest.TestCase):
                     patch.object(normal.Path, 'is_file', return_value=True), \
                     patch.object(normal.Path, 'read_text', read):
                 kernel.return_value.finish.return_value = normal.kernel_facts('denied')
+                if merge_error == 'fit': fit.side_effect = ValueError('fit guest-secret /private/path')
+                if merge_error == 'validate':
+                    def validate_merge(value):
+                        if value.get('failure_resources', {}).get('kernel', {}).get('state') == 'denied':
+                            raise ValueError('validate guest-secret /private/path')
+                        return validate_capture(value)
+                    validate.side_effect = validate_merge
+                if kernel_error == 'init': kernel.side_effect = RuntimeError('kernel guest-secret /private/path')
+                elif kernel_error: getattr(kernel.return_value, kernel_error).side_effect = RuntimeError('kernel guest-secret /private/path')
                 try:
-                    normal.run(build, dict(world_control='assertion'))
+                    outcome = normal.run(build, dict(world_control=None if successful else 'assertion'))
+                    self.assertEqual(cleanup_calls, [True])
+                    return outcome, build.CandidateFailure
                 except Exception as error:
+                    self.assertEqual(cleanup_calls, [True])
                     if cancel_root:
                         pid = int((root/'observer.pid').read_text())
                         self.assertFalse(Path('/proc', str(pid)).exists())
                     return error, build.CandidateFailure
             self.fail('Assertion replay passed')
+
+    def test_root_kernel_failures_preserve_candidate_result_and_always_clean_database(self):
+        for phase, reason in (('init', 'kernel-init-unavailable'),
+                              ('finish', 'kernel-merge-unavailable'),
+                              ('close', 'kernel-close-unavailable')):
+            with self.subTest(phase=phase):
+                error, candidate_failure = self.replay(True, sanitizer=True, kernel_error=phase)
+                self.assertIsInstance(error, candidate_failure)
+                result = error.result
+                self.assertEqual(result['exit_code'], 1)
+                self.assertTrue(result['cleanup_complete'])
+                self.assertTrue(result['database_cleanup'])
+                self.assertEqual(result['capture_error'], reason)
+                self.assertEqual(result['native_exit_codes'], [dict(name='world', returncode=0), dict(name='zone', returncode=-9)])
+                self.assertFalse(result['inserver_tests']['passed'])
+                self.assertEqual(result['pre_cleanup_observation']['processes'][1]['returncode'], -9)
+                self.assertEqual(result['failure_resources']['processes'][1]['pid'], 124)
+                self.assertEqual(result['failure_resources']['kernel']['state'],
+                                 'denied' if phase == 'close' else 'not-opened')
+                self.assertNotIn('adapter_error', result)
+                self.assertNotIn('guest-secret', json.dumps(result))
+                self.assertNotIn('/private/path', json.dumps(result))
+                normal.validate_capture(result)
+
+    def test_root_merge_is_transactional_on_fit_or_validation_exception(self):
+        for phase in ('fit', 'validate'):
+            with self.subTest(phase=phase):
+                error, candidate_failure = self.replay(True, sanitizer=True, merge_error=phase)
+                self.assertIsInstance(error, candidate_failure)
+                self.assertEqual(error.result['exit_code'], 1)
+                self.assertTrue(error.result['database_cleanup'])
+                self.assertTrue(error.result['cleanup_complete'])
+                self.assertEqual(error.result['capture_error'], 'kernel-merge-unavailable')
+                self.assertEqual(error.result['failure_resources']['kernel']['state'], 'not-opened')
+                self.assertEqual(error.result['pre_cleanup_observation']['processes'][1]['returncode'], -9)
+                self.assertNotIn('guest-secret', json.dumps(error.result))
+                self.assertNotIn('/private/path', json.dumps(error.result))
+                normal.validate_capture(error.result)
+
+    def test_root_invalid_resource_capture_retains_valid_latch_without_raw_metadata(self):
+        error, candidate_failure = self.replay(True, sanitizer=True, malformed_capture=True)
+        self.assertIsInstance(error, candidate_failure)
+        self.assertEqual(error.result['capture_error'], 'root-capture-unavailable')
+        self.assertEqual(error.result['pre_cleanup_observation']['processes'][1]['returncode'], -9)
+        self.assertNotIn('failure_resources', error.result)
+        self.assertTrue(error.result['database_cleanup'])
+        self.assertNotIn('guest-secret', json.dumps(error.result))
+        self.assertNotIn('/private/path', json.dumps(error.result))
+        normal.validate_capture(error.result)
+
+    def test_root_kernel_failures_do_not_reclassify_success_or_add_failure_capture(self):
+        for phase in ('init', 'finish', 'close'):
+            with self.subTest(phase=phase):
+                result, _ = self.replay(True, sanitizer=True, kernel_error=phase, successful=True)
+                self.assertIsInstance(result, dict)
+                self.assertEqual(result['exit_code'], 0)
+                self.assertTrue(result['database_cleanup'])
+                self.assertTrue(result['cleanup_complete'])
+                for key in ('capture_error', 'pre_cleanup_observation', 'failure_resources'):
+                    self.assertNotIn(key, result)
 
     def test_shared_memory_config_changes_cannot_replace_authoritative_scrub_snapshot(self):
         error, candidate_failure = self.replay(True, source=True, sanitizer=True, changed_config=True)

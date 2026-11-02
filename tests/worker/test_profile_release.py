@@ -74,7 +74,7 @@ class Publication(unittest.TestCase):
         for path in self.root.rglob('*'):
             if path.is_dir() and path!=lock.parent: path.chmod(0o755)
         self.package=self.root/'package'
-        self.receipt=release.prepare(self.package,ROOT,self.ordinary,'a'*40,'b'*40)
+        self.receipt=release.prepare(self.package,ROOT,self.ordinary,'a'*40,'b'*40,host=self.host)
         self.before=release.retained(self.host)
 
     def operation(self,name): return release.operate(self.host,self.package,self.receipt['package_sha256'],name)
@@ -95,6 +95,7 @@ class Publication(unittest.TestCase):
         self.assertIn('MemoryMax=6G',files['service'].decode())
         self.assertIn('profiling.json',files['service'].decode())
         self.assertFalse(self.receipt['installed'])
+        self.assertEqual(json.loads(files['retained.json'])['files'],self.before)
 
     def test_apply_verify_repeat_and_rollback_preserve_every_retained_asset(self):
         self.operation('apply');self.operation('apply');self.operation('verify')
@@ -107,6 +108,78 @@ class Publication(unittest.TestCase):
         self.assertEqual(release.retained(self.host),self.before)
         self.assertFalse(self.host.path(release.CONFIG).exists())
         self.assertFalse(self.host.path(release.RELEASE_ROOT+'/'+'a'*40).exists())
+
+    def test_reviewed_public_snapshot_never_probes_private_state_or_lock(self):
+        original=self.host.path
+        def public_only(name):
+            if str(name).startswith('/var/'):
+                self.fail('Preparation must not observe private active markers or lock')
+            return original(name)
+        with patch.object(self.host,'path',side_effect=public_only):
+            receipt=release.prepare(self.root/'public-only',ROOT,self.ordinary,'a'*40,'b'*40,host=self.host)
+        self.assertEqual(receipt['package_sha256'],self.receipt['package_sha256'])
+
+    def test_before_first_apply_retained_bytes_and_metadata_drift_refuse_without_publication(self):
+        changes=[('/srv/ordinary/validation/worker/runtime.py',kind) for kind in ('bytes','mode','uid','gid')]
+        changes += [('/srv/eqemu-validator-asan-v1/scripts/check-validation-worker',kind) for kind in ('bytes','mode')]
+        for config,stem in (('config.json','eqemu-validator'),('asan-v1.json','eqemu-validator-asan-v1'),
+                            ('asan-v2.json','eqemu-validator-asan-v2'),('asan-v3.json','eqemu-validator-asan-v3')):
+            changes += [('/etc/eqemu-validator/'+config,'bytes'),('/etc/systemd/system/'+stem+'@.service','bytes'),
+                        ('/etc/systemd/system/'+stem+'.socket','bytes'),('/etc/apparmor.d/'+stem,'bytes')]
+        for name,kind in changes:
+            with self.subTest(asset=name,change=kind):
+                case=Publication();case.setUp()
+                try:
+                    path=case.host.path(name)
+                    if kind=='bytes': path.write_bytes(path.read_bytes()+b'\n')
+                    elif kind=='mode': path.chmod(0o600)
+                    else:
+                        info=case.host.info(path)
+                        case.host.owners[str(path)]=(info.st_uid+(kind=='uid'),info.st_gid+(kind=='gid'))
+                    original=release.retained
+                    def locked_snapshot(host):
+                        with self.assertRaises(BlockingIOError):
+                            with release.shared_lock(host,case.ordinary): pass
+                        return original(host)
+                    with patch.object(release,'retained',side_effect=locked_snapshot):
+                        with self.assertRaisesRegex(ValueError,'Reviewed retained assets changed'): case.operation('apply')
+                    for owned in (release.JOURNAL,release.CONFIG,release.STATE,release.RELEASE_ROOT+'/'+'a'*40,
+                                  '/etc/systemd/system/'+release.SERVICE,'/etc/systemd/system/'+release.SOCKET,release.POLICY):
+                        self.assertFalse(case.host.path(owned).exists())
+                    self.assertFalse(release.temporary(case.host.path(release.JOURNAL)).exists())
+                    self.assertFalse(any(call[1] in ('start','stop','daemon-reload','-r','-R') for call in case.host.calls))
+                finally: case.doCleanups()
+
+    def test_reviewed_baseline_is_package_bound_and_enforced_on_later_operations(self):
+        self.operation('apply')
+        target=self.host.path('/srv/ordinary/validation/worker/runtime.py');original=target.read_bytes()
+        target.write_bytes(original+b'drift')
+        for operation in ('apply','verify','activate','rollback'):
+            with self.subTest(operation=operation),self.assertRaisesRegex(ValueError,'Reviewed retained assets changed'):
+                self.operation(operation)
+            self.assertTrue(self.host.path(release.CONFIG).exists())
+        other=release.prepare(self.root/'different-baseline',ROOT,self.ordinary,'a'*40,'b'*40,host=self.host)
+        self.assertNotEqual(other['package_sha256'],self.receipt['package_sha256'])
+        target.write_bytes(original);self.operation('rollback');self.operation('rollback')
+        snapshot=self.package/'retained.json';saved=snapshot.read_bytes();snapshot.write_bytes(b'{}')
+        with self.assertRaisesRegex(ValueError,'identity mismatch'): self.operation('apply')
+        snapshot.write_bytes(saved);snapshot.unlink()
+        with self.assertRaisesRegex(ValueError,'omitted'): self.operation('apply')
+
+    def test_bootstrap_literal_pins_ignore_mutable_checksum_file_and_detect_copy_drift(self):
+        # This is the same stdin verification as the quoted handoff here-document.
+        expected=(self.receipt['operator_sha256']+'  '+str(self.package/'operator.py')+'\n'
+                  +self.receipt['package_sha256']+'  '+str(self.package/'package.json')+'\n')
+        mutable=self.root/'submitter-writable.sha256';mutable.write_text('not trusted\n')
+        def verify():
+            return subprocess.run(['/usr/bin/sha256sum','--check','-'],input=expected,text=True,capture_output=True).returncode
+        self.assertEqual(verify(),0)
+        for name in ('operator.py','package.json'):
+            path=self.package/name;original=path.read_bytes();path.write_bytes(original+b'changed')
+            mutable.write_text(release.sha(path.read_bytes())+'  '+str(path)+'\n')
+            self.assertNotEqual(verify(),0)
+            path.write_bytes(original)
+        self.assertEqual(verify(),0)
 
     def test_partial_publication_can_finish_or_roll_back_repeatedly(self):
         self.host.fail_after=5

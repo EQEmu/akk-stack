@@ -61,7 +61,7 @@ def read_virtual(path,limit=1024**2):
     return data
 
 
-def prepare(output,source,ordinary,commit,base):
+def prepare(output,source,ordinary,commit,base,*,host=None):
     """Pure packaging from a clean source commit; no installation or setup commands."""
     if not all(re.fullmatch('[a-f0-9]{40}',value) for value in (commit,base)): raise ValueError('Full source pins required')
     if ordinary.get('state_dir')!='/var/lib/eqemu-validator': raise ValueError('Default ordinary shared lock required')
@@ -95,6 +95,9 @@ def prepare(output,source,ordinary,commit,base):
         if '@' in text.replace('validator@.service',''): raise ValueError('Unexpanded profiling template token')
         files[name]=text.encode()
     files['operator.py']=read(Path(__file__))
+    # Public file bytes/metadata are reviewable without observing private worker
+    # state. The package hash binds this baseline before the first root apply.
+    files['retained.json']=canonical(dict(version=1,scope='public-retained-files',files=retained_assets(host or Host())))
     output.mkdir(mode=0o700)
     for name,data in files.items():
         path=output/name;path.parent.mkdir(parents=True,exist_ok=True)
@@ -110,7 +113,7 @@ def load_package(directory,expected):
     raw=read(directory/'package.json',65536)
     if sha(raw)!=expected: raise ValueError('Package SHA256 mismatch')
     value=json.loads(raw)
-    wanted={'code/'+name for name in SOURCE_FILES}|{'code/manifest.json','config.json','service','socket','apparmor','operator.py'}
+    wanted={'code/'+name for name in SOURCE_FILES}|{'code/manifest.json','config.json','service','socket','apparmor','operator.py','retained.json'}
     if (value.get('version')!=1 or set(value.get('files',{}))!=wanted
             or not re.fullmatch('[a-f0-9]{40}',value.get('source_commit',''))): raise ValueError('Package closure mismatch')
     found=set()
@@ -123,6 +126,18 @@ def load_package(directory,expected):
     if sum(map(len,files.values()))>MAX_BYTES: raise ValueError('Profiling package budget')
     for name,data in files.items():
         if value['files'][name]!={'bytes':len(data),'sha256':sha(data)}: raise ValueError('Package file identity mismatch: '+name)
+    reviewed=json.loads(files['retained.json'])
+    if (not isinstance(reviewed,dict) or set(reviewed)!={'version','scope','files'} or type(reviewed['version']) is not int or reviewed['version']!=1
+            or reviewed['scope']!='public-retained-files' or not isinstance(reviewed['files'],dict)
+            or not 1<=len(reviewed['files'])<=1040):
+        raise ValueError('Malformed reviewed retained inventory')
+    for path,item in reviewed['files'].items():
+        if (not path or Path(path).is_absolute() or '..' in Path(path).parts
+                or not isinstance(item,dict) or set(item)!={'sha256','bytes','uid','gid','mode'}
+                or not isinstance(item['sha256'],str) or not re.fullmatch('[a-f0-9]{64}',item['sha256'])
+                or any(type(item[key]) is not int or not 0<=item[key]<=limit for key,limit in
+                       (('bytes',1024**2),('uid',2**32-1),('gid',2**32-1),('mode',0o7777)))):
+            raise ValueError('Malformed reviewed retained asset')
     config=json.loads(files['config.json'])
     release=RELEASE_ROOT+'/'+value['source_commit']
     if (config.get('code_dir')!=release or config.get('state_dir')!=STATE or config.get('shared_lock')!=SHARED_LOCK
@@ -175,20 +190,23 @@ def quiescent(host):
     host.processes()
 
 
-def retained(host):
-    """Record actual retained metadata, including submitter-owned ordinary helpers."""
+def retained_assets(host,*,check_activity=False):
+    """Public file snapshot; private active checks are reserved for locked operations."""
     result={}
     for name in ('config.json','asan-v1.json','asan-v2.json','asan-v3.json'):
         path=host.path('/etc/eqemu-validator/'+name)
         if not path.exists(): raise ValueError('Expected retained selection configuration missing')
         protected(host,path)
         config=json.loads(read(path))
-        state=host.path(config['state_dir'])
-        if (state/'active.json').exists() or (state/'active.json').is_symlink():
-            raise ValueError('Retained worker has active or unconfirmed cleanup state')
+        if check_activity:
+            state=host.path(config['state_dir'])
+            if (state/'active.json').exists() or (state/'active.json').is_symlink():
+                raise ValueError('Retained worker has active or unconfirmed cleanup state')
         code=host.path(config['code_dir'])
+        if code.is_symlink() or not code.is_dir(): raise ValueError('Retained code root is not a directory')
         entries=list(code.rglob('*'))
-        if len(entries)>256 or any(item.is_symlink() for item in entries): raise ValueError('Retained code tree is unknown or oversized')
+        if len(entries)>256 or any(item.is_symlink() or not (item.is_file() or item.is_dir()) for item in entries):
+            raise ValueError('Retained code tree is unknown or oversized')
         paths=[path,*[item for item in entries if item.is_file()]]
         stem='eqemu-validator' if name=='config.json' else 'eqemu-validator-'+name.removesuffix('.json')
         paths += [host.path('/etc/systemd/system/'+stem+suffix) for suffix in ('@.service','.socket')]
@@ -197,6 +215,11 @@ def retained(host):
             raw=read(asset);info=host.info(asset)
             result[str(asset.relative_to(host.root))]=dict(sha256=sha(raw),bytes=len(raw),uid=info.st_uid,gid=info.st_gid,mode=stat.S_IMODE(info.st_mode))
     return result
+
+
+def retained(host):
+    """Locked-operation observation, including private activity refusal."""
+    return retained_assets(host,check_activity=True)
 
 
 @contextlib.contextmanager
@@ -269,12 +292,14 @@ def operate(host,directory,expected,operation):
         if active.exists() or active.is_symlink():
             raise ValueError('Profiling worker has active or unconfirmed cleanup state')
         before=retained(host)
-        proposed_journal=dict(version=1,package_sha256=expected,retained=before)
+        reviewed=json.loads(files['retained.json'])['files']
+        if before!=reviewed: raise ValueError('Reviewed retained assets changed before operation')
+        proposed_journal=dict(version=1,package_sha256=expected,retained=reviewed)
         check_temporary(host,temporary(marker),canonical(proposed_journal),0o600)
         journal=json.loads(read(marker)) if marker.exists() else None
         if journal is not None:
             protected(host,marker,mode=0o600)
-            if journal.get('package_sha256')!=expected or journal.get('retained')!=before:
+            if journal.get('package_sha256')!=expected or journal.get('retained')!=reviewed:
                 raise ValueError('Publication journal or retained assets changed')
         release=host.path(config['code_dir'])
         if release.exists():

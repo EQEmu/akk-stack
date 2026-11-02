@@ -162,22 +162,36 @@ python3 -B validation/worker/profile_release.py prepare \
 ```
 
 It includes only the reviewed worker/frontend closure, a new independent code
-manifest, config, service/socket, exact AppArmor profile and its operator.
+manifest, config, service/socket, exact AppArmor profile, operator and a finite
+`retained.json` snapshot of the old public-readable configs/code/units/policy.
+That snapshot records actual file hashes, sizes, UID/GID and modes, including
+ordinary UID1000 exceptions, and is bound by the package SHA256. Preparation
+does not inspect private active markers or the worker lock. Every operation
+compares current retained assets to this reviewed snapshot under the existing
+shared lock before creating a journal or changing any asset. The first apply
+cannot adopt a newly observed baseline. Later operations must also match it.
 Preparation runs no setup/staging or installed service commands.
 Review all bytes, the returned package/operator pins and retained preconditions.
 Before root execution, copy the package into a fresh root-owned mode-0700
 directory, preserving no submitter ownership. Verify the copied operator and
-package hashes against the reviewed pins. The operator refuses an unprotected
+package hashes against literal reviewed pins supplied directly to sha256sum.
+Do not read expected pins from a submitter-writable checksum file. The operator refuses an unprotected
 package directory; execute its protected copy.
 The following are separate proposed root steps, not authorization to run them:
 
 ```sh
-sha256sum /root/reviewed-profile-release/operator.py /root/reviewed-profile-release/package.json
+sudo sha256sum --check - <<'REVIEWED_PINS'
+REVIEWED_OPERATOR_SHA256  /root/reviewed-profile-release/operator.py
+REVIEWED_PACKAGE_SHA256  /root/reviewed-profile-release/package.json
+REVIEWED_PINS
 sudo python3 -I /root/reviewed-profile-release/operator.py apply --package /root/reviewed-profile-release --package-sha256 REVIEWED_SHA256
 sudo python3 -I /root/reviewed-profile-release/operator.py verify --package /root/reviewed-profile-release --package-sha256 REVIEWED_SHA256
 sudo python3 -I /root/reviewed-profile-release/operator.py activate --package /root/reviewed-profile-release --package-sha256 REVIEWED_SHA256
 sudo python3 -I /root/reviewed-profile-release/operator.py rollback --package /root/reviewed-profile-release --package-sha256 REVIEWED_SHA256
 ```
+
+Replace both checksum placeholders with the reviewed literal hashes before
+running the command. The final handoff includes exact paths and literal pins.
 
 Apply publishes only `/srv/eqemu-validator-profiling/FULL_COMMIT`,
 `/etc/eqemu-validator/profiling.json`, private state, unit/socket and profile.

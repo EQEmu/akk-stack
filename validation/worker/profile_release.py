@@ -282,7 +282,13 @@ def operate(host,directory,expected,operation):
             if len(entries)>128 or any(p.is_symlink() or not (p.is_file() or p.is_dir()) or p.is_file() and p not in expected_paths or p.is_dir() and p not in expected_dirs for p in entries):
                 raise ValueError('Unknown asset in profiling release')
         for path,data in targets.items():
-            check_temporary(host,temporary(host.path(path)),data,0o755 if '/scripts/' in path else 0o644)
+            dest=host.path(path);mode=0o755 if '/scripts/' in path else 0o644
+            check_temporary(host,temporary(dest),data,mode)
+            if dest.exists() or dest.is_symlink():
+                protected(host,dest,mode=mode)
+                if read(dest)!=data: raise ValueError('Published profiling asset changed')
+            elif operation in ('verify','activate'):
+                raise ValueError('Published profiling asset missing')
         if operation=='apply':
             if journal is None:
                 # Refuse collisions before acquiring ownership of any publication.
@@ -334,12 +340,6 @@ def operate(host,directory,expected,operation):
             profiles=host.path('/sys/kernel/security/apparmor/profiles')
             if profiles.exists() and 'eqemu-validator-profiling (enforce)' in read_virtual(profiles).decode().splitlines():
                 host.run(['/usr/sbin/apparmor_parser','-R',str(host.path(POLICY))])
-            for path,data in targets.items():
-                dest=host.path(path)
-                check_temporary(host,temporary(dest),data,0o755 if '/scripts/' in path else 0o644)
-                if dest.exists() or dest.is_symlink():
-                    protected(host,dest,mode=0o755 if '/scripts/' in path else 0o644)
-                    if read(dest)!=data: raise ValueError('Rollback refuses changed profiling asset')
             for path in targets:
                 temporary(host.path(path)).unlink(missing_ok=True)
                 host.path(path).unlink(missing_ok=True)

@@ -109,7 +109,7 @@ class Publication(unittest.TestCase):
 
     def test_collision_drift_unknown_source_and_tampering_refuse(self):
         collision=self.host.path(release.CONFIG);collision.write_bytes(b'not owned')
-        with self.assertRaisesRegex(ValueError,'collision'): self.operation('apply')
+        with self.assertRaises(ValueError): self.operation('apply')
         self.assertEqual(collision.read_bytes(),b'not owned');collision.unlink()
         self.operation('apply')
         code=self.host.path(release.RELEASE_ROOT+'/'+'a'*40)
@@ -288,3 +288,18 @@ class ReviewR3Regression(unittest.TestCase):
                 with self.subTest(mode=mode,action=action),self.assertRaises(ValueError): self.operation(action)
         self.assertFalse(any(call[1:2]==['start'] for call in self.host.calls))
         path.unlink();self.operation('verify')
+
+
+class ReviewR4RollbackRegression(unittest.TestCase):
+    setUp=Publication.setUp
+    operation=Publication.operation
+
+    def test_policy_drift_refuses_before_socket_stop_or_policy_unload(self):
+        self.operation('apply')
+        table=self.host.path('/sys/kernel/security/apparmor/profiles')
+        table.parent.mkdir(parents=True);table.write_text('eqemu-validator-profiling (enforce)\n')
+        self.host.path(release.POLICY).write_text('profile eqemu-validator {}\n')
+        self.host.calls.clear()
+        with self.assertRaisesRegex(ValueError,'changed'): self.operation('rollback')
+        self.assertFalse(any(call[1:2] in (['stop'],['-R']) for call in self.host.calls))
+        self.assertTrue(self.host.path(release.CONFIG).exists())

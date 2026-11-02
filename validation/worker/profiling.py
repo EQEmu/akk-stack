@@ -188,17 +188,20 @@ def exporter(config):
     """Blocking transport lives in its own process, never in the sampling loop."""
     directory = Path(config['directory']); offsets = {}; total = 0
     while time.monotonic() < config['deadline'] + 5:
+        # Finalization can appear during a sweep. Only a sweep begun after it
+        # observes every immutable final artifact, including rewritten perf headers.
+        finalized=(directory/'export.done').exists()
         for name in sorted(NAMES):
             path = directory/name
             # perf rewrites its header at finalization; export only the finalized bytes.
-            if name.endswith('.perf.data') and not (directory/'export.done').exists(): continue
+            if name.endswith('.perf.data') and not finalized: continue
             if not path.is_file() or path.is_symlink(): continue
             with path.open('rb') as stream:
                 offset = offsets.get(name,0); stream.seek(offset)
                 while total < TOTAL_LIMIT and (data := stream.read(min(CHUNK, FILE_LIMIT-offset, TOTAL_LIMIT-total))):
                     sys.stdout.buffer.write(frame(name,offset,data)); sys.stdout.buffer.flush()
                     offset += len(data); total += len(data); offsets[name] = offset
-        if (directory/'export.done').exists(): return
+        if finalized: return
         time.sleep(.2)
 
 

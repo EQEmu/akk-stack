@@ -699,7 +699,7 @@ def retain_profiles(job,state,run_id,report):
     """Retain one bounded private collection independently of disposable VM cleanup."""
     from profile_artifacts import inventory
     current=state/'last-profile'
-    metadata=dict(run_id=run_id,files=inventory(job/'profiles'),
+    metadata=dict(version=1,run_id=run_id,files=inventory(job/'profiles'),
         partial=report.get('guest',{}).get('profile_transport',{}).get('complete') is not True,
         execution_exit_code=report.get('exit_code',2),
         retention='one collection, replaced by next profiling run; operator may delete sooner')
@@ -714,17 +714,29 @@ def retain_profiles(job,state,run_id,report):
     report['profile_artifacts']=metadata
 
 
-def recover_profile_identity(state,run_id,report):
-    """Recovery may replace verdict/cleanup fields, never the matching collection ID."""
+def retained_profile(state,run_id):
+    """The collection identity is independent of any later job/cleanup receipt."""
     from profile_artifacts import inventory
     directory=state/'last-profile'
-    if not (directory/'collection.json').is_file(): return
+    files=inventory(directory)
+    metadata=read_json(directory/'collection.json')
+    if not isinstance(metadata,dict) or set(metadata)!={'version','run_id','files','partial','execution_exit_code','retention'} or metadata.get('version')!=1:
+        raise ValueError('Malformed retained profile identity')
+    if metadata['run_id']!=run_id: return None
+    if metadata['files']!=files: raise ValueError('Retained profile changed')
+    if type(metadata['execution_exit_code']) is not int or metadata['execution_exit_code'] not in (0,1,2):
+        raise ValueError('Malformed retained profile verdict')
+    return metadata
+
+
+def recover_profile_identity(state,run_id,report):
+    """Recovery may replace verdict/cleanup fields, never the matching collection ID."""
+    if not (state/'last-profile/collection.json').is_file(): return
     try:
-        metadata=read_json(directory/'collection.json')
-        if metadata.get('run_id')!=run_id: return
-        if metadata.get('files')!=inventory(directory): raise ValueError('Retained profile changed')
+        metadata=retained_profile(state,run_id)
+        if metadata is None: return
         report['profile_artifacts']=dict(metadata,partial=True)
-        report['profile_recovery']=dict(original_execution_exit_code=metadata.get('execution_exit_code'),partial=True)
+        report['profile_recovery']=dict(original_execution_exit_code=metadata['execution_exit_code'],partial=True)
     except (OSError,ValueError) as error:
         report['profile_recovery_error']=type(error).__name__
 
@@ -759,16 +771,13 @@ def request(connection, value):
         from profile_artifacts import inventory, send
         lock=acquire(value)
         try:
-            report=read_json(Path(value['state_dir'])/'last-result.json',limit=65536)
-            if report.get('run_id')!=data['run_id'] or report.get('profile_artifacts',{}).get('run_id')!=data['run_id']:
-                raise ValueError('Requested profile is no longer retained')
+            metadata=retained_profile(Path(value['state_dir']),data['run_id'])
+            if metadata is None: raise ValueError('Requested profile is no longer retained')
             directory=Path(value['state_dir'])/'last-profile'
-            files=inventory(directory)
-            if files!=report['profile_artifacts']['files']: raise ValueError('Retained profile changed')
             connection.settimeout(30)
             with connection.makefile('wb') as stream: send(directory,stream)
             return dict(version=1,operation='profile-artifacts',scope='profile-export-only',exit_code=0,executed=False,
-                run_id=data['run_id'],workload_exit_code=report['exit_code'],profile_artifacts=report['profile_artifacts'])
+                run_id=data['run_id'],workload_exit_code=metadata['execution_exit_code'],profile_artifacts=metadata)
         finally: os.close(lock)
     if data.get('operation') == 'build':
         if (set(data) != {'version', 'operation', 'candidate', 'tree', 'bytes', 'sha256'} | ({'profiling'} if 'profiling' in data else set())

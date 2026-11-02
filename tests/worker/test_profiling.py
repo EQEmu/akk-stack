@@ -379,4 +379,40 @@ class RecoveryRegression(unittest.TestCase):
         self.assertIn(b'timeline.jsonl',self.client.recv(4096))
 
 
+
+
+class ReviewR4ExportRegressions(unittest.TestCase):
+    def test_exporter_sweeps_again_if_finalization_appears_during_a_sweep(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory=Path(tmp)
+            (directory/'world.perf.data').write_bytes(b'final perf header and records')
+            original=Path.is_file;fired=[False]
+            def exists(path):
+                if path==directory/'timeline.jsonl' and not fired[0]:
+                    fired[0]=True
+                    (directory/'summary.json').write_bytes(b'{"final":true}\n')
+                    (directory/'export.done').touch()
+                return original(path)
+            output=io.BytesIO()
+            from types import SimpleNamespace
+            with patch.object(Path,'is_file',side_effect=exists,autospec=True),patch.object(profiling.sys,'stdout',SimpleNamespace(buffer=output)):
+                profiling.exporter(dict(directory=str(directory),deadline=time.monotonic()+3))
+            names={json.loads(line.removeprefix(artifacts.PREFIX))['name'] for line in output.getvalue().splitlines()}
+            self.assertIn('summary.json',names)
+            self.assertIn('world.perf.data',names)
+
+    def test_ordinary_job_receipt_cannot_hide_retained_profile(self):
+        import test_runtime
+        test_runtime.Runtime.setUp(self)
+        run_id='e'*32;job=self.state/run_id;job.mkdir()
+        sink=artifacts.Sink(job/'profiles');sink.accept(dict(name='timeline.jsonl',offset=0,data='YQ=='))
+        prior=dict(exit_code=1);runtime.retain_profiles(job,self.state,run_id,prior)
+        runtime.atomic_json(self.state/'last-result.json',dict(version=1,run_id='f'*32,exit_code=0,scope='worker-smoke'))
+        self.client.sendall(json.dumps(dict(version=1,operation='profile-artifacts',run_id=run_id)).encode()+b'\n')
+        result=runtime.request(self.server,self.value)
+        self.assertEqual(result['workload_exit_code'],1)
+        self.assertEqual(result['profile_artifacts']['run_id'],run_id)
+        self.assertIn(b'timeline.jsonl',self.client.recv(4096))
+
+
 if __name__=='__main__': unittest.main()

@@ -149,6 +149,25 @@ class Publication(unittest.TestCase):
             marker.unlink()
         self.operation('rollback')
 
+    def test_own_active_or_uncertain_unit_refuses_rollback_under_shared_lock(self):
+        self.operation('apply')
+        original=self.host.run
+        def run(args):
+            if args[1]=='list-units':
+                self.assertIn('eqemu-validator*',args)
+                with self.assertRaises(BlockingIOError):
+                    with release.shared_lock(self.host,self.ordinary): pass
+                return row
+            return original(args)
+        for row in ('eqemu-validator-profiling@1.service loaded active running\n',
+                    'eqemu-validator-profiling@1.service loaded activating start\n',
+                    'eqemu-validator-profiling@1.service uncertain\n'):
+            self.host.calls.clear()
+            with patch.object(self.host,'run',side_effect=run):
+                with self.assertRaisesRegex(ValueError,'uncertain'): self.operation('rollback')
+            self.assertFalse(any(call[1] in ('stop','-R') for call in self.host.calls))
+            self.assertTrue(self.host.path(release.CONFIG).exists())
+
     def test_malformed_new_selection_and_new_manifest_mutation_or_omission_refuse(self):
         _,files,value=release.load_package(self.package,self.receipt['package_sha256'])
         for key,bad in (('shared_lock','/tmp/alternate'),('confinement','eqemu-validator-extra'),

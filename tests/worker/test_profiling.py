@@ -423,6 +423,8 @@ class ReviewR4ExportRegressions(unittest.TestCase):
         self.assertFalse(receipt['vm_cleanup_complete'])
         self.assertEqual(receipt['profiler']['collector_exit_codes'],[1,0])
         self.assertFalse(receipt['transport']['complete'])
+        self.assertTrue(receipt['profiler']['error_present'])
+        self.assertNotIn('collector failed',json.dumps(receipt))
         self.assertEqual(result['profile_artifacts']['run_id'],run_id)
         self.assertIn(b'timeline.jsonl',self.client.recv(4096))
 
@@ -445,6 +447,37 @@ class ReviewR5CollectorRegression(unittest.TestCase):
                 self.assertIn('collector',result['error'])
                 self.assertEqual(analyze.call_count,2)
                 self.assertTrue((directory/'world.perf.data').exists())
+
+    def test_collector_and_analyzer_zero_nonzero_matrix(self):
+        from unittest.mock import Mock
+        for collector in (0,1):
+            for analyzer in (0,1):
+                with self.subTest(collector=collector,analyzer=analyzer), tempfile.TemporaryDirectory() as tmp:
+                    directory=Path(tmp)
+                    (directory/'summary.json').write_text(json.dumps(dict(sampler_complete=True,processes=[{}],truncated=[])))
+                    for name in ('world','zone'): (directory/(name+'.perf.data')).write_bytes(b'readable trace')
+                    session=object.__new__(profiling.Session)
+                    session.directory=directory;session.mode='perf';session.tools={};session.preflight={}
+                    session.config={'binaries':{'world':{},'zone':{}}}
+                    session.sampler=Mock(returncode=0);session.exporter=Mock(returncode=0);session.stage=Mock()
+                    with patch.object(profiling,'tool',return_value=analyzer):
+                        result=session.finish(collector_exit_codes=[collector,collector])
+                    self.assertEqual(result['complete'],collector==analyzer==0)
+                    self.assertEqual(result['collector_exit_codes'],[collector,collector])
+                    self.assertEqual(result['analysis_exit_codes'],{'world-analysis':analyzer,'zone-analysis':analyzer})
+
+    def test_receipt_projects_only_finite_codes_and_flags_without_error_text(self):
+        secret='do-not-retain-private-error'
+        receipt=runtime.profile_receipt(dict(exit_code=2,cleanup_error=secret,guest=dict(
+            error=secret,profile_transport=dict(complete=False,export_error=secret),normal_world=dict(
+                exit_code=1,error=secret,profiling=dict(mode='perf',error=secret,
+                    collector_exit_codes=[1,secret],analysis_exit_codes={'world-analysis':0,secret:secret},
+                    preflight=dict(exit_code=1,error=secret))))))
+        self.assertNotIn(secret,json.dumps(receipt))
+        self.assertEqual(receipt['workload_exit_code'],1)
+        self.assertEqual(receipt['profiler']['collector_exit_codes'],[1,None])
+        self.assertTrue(receipt['profiler']['error_present'])
+        self.assertTrue(receipt['transport']['error_present'])
 
 
 if __name__=='__main__': unittest.main()

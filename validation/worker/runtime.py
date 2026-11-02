@@ -697,15 +697,27 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
 
 def profile_receipt(report):
     """Keep independent verdicts without retaining native logs, argv or environment."""
-    guest=report.get('guest',{})
-    normal=guest.get('normal_world',{})
-    profile=normal.get('profiling',{})
-    return dict(overall_exit_code=report.get('exit_code',2),
-        guest_exit_code=guest.get('exit_code'),workload_exit_code=normal.get('exit_code'),
-        native_cleanup_complete=normal.get('cleanup_complete'),database_cleanup_complete=normal.get('database_cleanup'),
-        vm_cleanup_complete=report.get('cleanup_complete'),
-        profiler={key:profile[key] for key in ('mode','complete','error','collector_exit_codes','analysis_exit_codes','preflight') if key in profile},
-        transport={key:guest.get('profile_transport',{})[key] for key in ('complete','partial','export_error') if key in guest.get('profile_transport',{})})
+    def code(value): return value if type(value) is int and -255<=value<=255 else None
+    def flag(value): return value if type(value) is bool else None
+    def mapping(value): return value if isinstance(value,dict) else {}
+    guest=mapping(report.get('guest'))
+    normal=mapping(guest.get('normal_world'))
+    profile=mapping(normal.get('profiling'))
+    transport=mapping(guest.get('profile_transport'))
+    collectors=profile.get('collector_exit_codes')
+    analyzers=profile.get('analysis_exit_codes')
+    preflight=profile.get('preflight')
+    return dict(overall_exit_code=code(report.get('exit_code',2)),
+        guest_exit_code=code(guest.get('exit_code')),workload_exit_code=code(normal.get('exit_code')),
+        native_cleanup_complete=flag(normal.get('cleanup_complete')),database_cleanup_complete=flag(normal.get('database_cleanup')),
+        vm_cleanup_complete=flag(report.get('cleanup_complete')),
+        profiler=dict(mode=profile.get('mode') if profile.get('mode') in ('timeline','heaptrack','perf') else None,
+            complete=flag(profile.get('complete')),error_present=bool(profile.get('error')),
+            collector_exit_codes=[code(value) for value in collectors] if isinstance(collectors,list) and len(collectors)<=2 else None,
+            analysis_exit_codes={key:code(analyzers[key]) for key in ('world-interpret','zone-interpret','world-analysis','zone-analysis') if isinstance(analyzers,dict) and key in analyzers},
+            preflight_exit_code=code(preflight.get('exit_code')) if isinstance(preflight,dict) else None),
+        transport=dict(complete=flag(transport.get('complete')),
+            partial=flag(transport.get('partial')),error_present=bool(transport.get('export_error'))))
 
 
 def retain_profiles(job,state,run_id,report):
@@ -713,7 +725,7 @@ def retain_profiles(job,state,run_id,report):
     from profile_artifacts import inventory
     current=state/'last-profile'
     metadata=dict(version=1,run_id=run_id,files=inventory(job/'profiles'),
-        partial=report.get('guest',{}).get('profile_transport',{}).get('complete') is not True,
+        partial=profile_receipt(report)['transport']['complete'] is not True,
         execution_exit_code=report.get('exit_code',2),
         result_receipt=profile_receipt(report),
         retention='one collection, replaced by next profiling run; operator may delete sooner')

@@ -105,7 +105,8 @@ scripts/validate-worker-candidate --config /etc/eqemu-validator/profiling.json \
 Export exit zero means bytes exported. `workload_exit_code` is the original
 native observer verdict, or null if it was unavailable. `execution_exit_code`
 is the overall worker verdict. The collection's bounded `result_receipt` keeps
-native/database/VM cleanup, collector/analyzer and transport outcomes separate,
+native/database/VM cleanup, collector/analyzer and transport outcomes separate.
+This receipt includes only finite status codes and flags, with no raw error text,
 even after later jobs replace last-result. Last-result stores the bounded
 inventory, not raw bytes. Delete private
 exports when no longer needed; root may remove the retained copy after export.

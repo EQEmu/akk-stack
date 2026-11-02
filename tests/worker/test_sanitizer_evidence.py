@@ -100,6 +100,48 @@ class SanitizerEvidence(unittest.TestCase):
         self.assertNotIn(secret[-16:],json.dumps(evidence))
         self.assertIn('*',evidence['progress']['last_completed_case']['name'])
 
+    def test_complete_artifact_budgets_optional_text_after_adding_suite_and_capture(self):
+        from test_normal_world import suite
+        run='a'*32;name='\U0001f600'*64
+        events=[dict(version=1,run_id=run,event='case-start',name=name,elapsed_ms=1),
+                dict(version=1,run_id=run,event='case-end',name=name,elapsed_ms=2,passed=False,diagnostic='\U0001f600'*256),
+                dict(version=1,run_id=run,event='case-start',name=name,elapsed_ms=3)]
+        data=b'\x00'*128+b'\nruntime error: first\n'+b'x'*1200+b'\nEQEMU_NATIVE_DIAGNOSTIC_CONTEXT '+b'c'*498+b'\n'
+        data+=b'EQEMU_NATIVE_DIAGNOSTIC_STACK_BEGIN\n'+b's'*2996+b'\nEQEMU_NATIVE_DIAGNOSTIC_STACK_END\n'
+        data+=b''.join(b'EQEMU_INSERVER_PROGRESS '+normal.encoded(event)+b'\n' for event in events)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);paths=[root/name for name in ('world-console.log','zone-console.log')]
+            for path in paths:path.write_bytes(data)
+            with patch.dict(os.environ,{'ASAN_OPTIONS':'detect_leaks=1'}):
+                evidence=normal.failure_snapshot([],paths,run,time.monotonic(),dict(condition='child-exit'),reserved=2176)
+            self.assertLessEqual(len(normal.encoded(evidence)),9824)
+            capture=normal.FailureCapture(time.monotonic(),proc=root/'missing')
+            children=[Mock(pid=123,poll=Mock(return_value=None)),Mock(pid=124,poll=Mock(return_value=1))]
+            for name,child in zip(('world','zone'),children):capture.watch(name,child)
+            capture.latch(children,'child-exit',[None,1])
+            metadata=dict(pre_cleanup_observation=capture.pre,failure_resources=capture.finish())
+            report=failure();report['diagnostic_profile']='asan-ubsan-native-v1'
+            completed=suite();completed.update(selected=10,started=10,completed=10,failed=10,passed=False,
+                tests=[dict(name=str(i)+'n'*63,passed=False,diagnostic='d'*256) for i in range(10)])
+            normal.validate_inserver(completed)
+            report['guest']['normal_world'].update(metadata,failure_evidence=evidence,inserver_tests=completed,
+                error='e'*498,control=None,ready_seconds=1,baseline_seconds=5,responsive_samples=50,cpu_ticks=[1,1],
+                clock_ticks_per_second=100,fixture_manifest_sha256='a'*64,database_cleanup=True,
+                binaries={name:'b'*64 for name in ('world','zone','shared_memory')},
+                native_exit_codes=[dict(name='world',returncode=0),dict(name='zone',returncode=1)])
+            report['guest']['sanitizers']=dict(environment=dict(ASAN_OPTIONS='a'*100,UBSAN_OPTIONS='u'*100,ASAN_SYMBOLIZER_PATH='/usr/bin/addr2line'),
+                symbolizer=dict(path='/usr/bin/addr2line',sha256='b'*64,version='v'*300),
+                runtime_libraries={name:dict(path='/usr/lib/'+name,sha256='c'*64) for name in ('libasan.so','libubsan.so')},
+                binaries={name:dict(sha256='d'*64,runtimes=['libasan','libubsan']) for name in ('tests','world','zone','shared_memory')},
+                compile_commands_sha256='e'*64,exclusions=['e'*80]*3,optimization_exceptions=['e'*80]*5)
+            artifact=normal.export_evidence(report,'a'*40,root/'evidence')
+            actual=json.loads(artifact.read_text());actual_normal=actual['normal_world']
+            self.assertTrue(actual['truncated']);self.assertLessEqual(artifact.stat().st_size,16384)
+            self.assertEqual(actual_normal['inserver_tests'],completed)
+            for key in metadata:self.assertEqual(actual_normal[key],metadata[key])
+            self.assertEqual(actual_normal['failure_evidence']['first_sanitizer_diagnostic'],evidence['first_sanitizer_diagnostic'])
+            self.assertTrue(actual_normal['cleanup_complete']);self.assertEqual(actual['exit_code'],1)
+
     def test_first_sanitizer_context_and_final_stack_survive_long_middle(self):
         header = b'/source/task.cpp:12:9: runtime error: trusted fixture diagnostic\n'
         zone = (b'earlier context\n' + header + b'    #0 first_source /source/task.cpp:12\n'

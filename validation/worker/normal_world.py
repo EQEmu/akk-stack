@@ -603,6 +603,37 @@ def validate_capture(value):
     if len(encoded(fields))>2048: raise ValueError('Combined failure capture budget')
 
 
+def shrink_failure_evidence(evidence):
+    """Spend whole-record budgets on headers and facts before optional text."""
+    console = evidence.get('console', {})
+    names = [name for name, text in console.items() if isinstance(text, str) and text] if isinstance(console, dict) else []
+    if names:
+        name = max(names, key=lambda key: len(encoded(console[key])))
+        console[name] = bounded_text(console[name], len(console[name].encode())//2)
+        evidence.setdefault('console_truncated', {})[name] = True
+    else:
+        choices = []
+        progress = evidence.get('progress', {})
+        for event in ('active_case','last_completed_case'):
+            item = progress.get(event) if isinstance(progress, dict) else None
+            if not isinstance(item, dict): continue
+            for field in ('name','diagnostic'):
+                if isinstance(item.get(field), str) and item[field]:
+                    choices.append((len(encoded(item[field])), 'progress', item, field))
+        source = evidence.get('source_diagnostics', {})
+        if isinstance(source, dict):
+            for field in ('stack','context'):
+                if isinstance(source.get(field), str) and source[field]:
+                    choices.append((len(encoded(source[field])), 'source', source, field))
+        if not choices: return False
+        size, kind, item, field = max(choices, key=lambda choice: choice[0])
+        item[field] = bounded_json_text(item[field], max(2, size//2))
+        if kind == 'progress': evidence['progress_truncated'] = True
+        else: item[field + '_truncated'] = True
+    evidence['truncated'] = True
+    return True
+
+
 def failure_snapshot(processes, logs, run_id, start, observation, secrets=(), reserved=0):
     """Bound console evidence independently from the latched pre-cleanup poll."""
     evidence = dict(version=1, run_id=run_id, elapsed_ms=max(0, int((time.monotonic()-start)*1000)),
@@ -653,29 +684,8 @@ def failure_snapshot(processes, logs, run_id, start, observation, secrets=(), re
     # Bound JSON-encoded bytes, including escaping of hostile console text.
     evidence['truncated'] = False
     while len(encoded(evidence)) > 12000-reserved:
-        evidence['truncated'] = True
-        name = max(evidence['console'], key=lambda name: len(evidence['console'][name]), default=None)
-        if name is None or not evidence['console'][name]:
-            # Valid escaped progress can consume several KiB independently of
-            # the tails. Bound its advisory strings without changing suite data.
-            changed = False
-            for event in ('active_case','last_completed_case'):
-                item = evidence['progress'].get(event)
-                if not isinstance(item, dict): continue
-                for field, limit in (('name',128),('diagnostic',512)):
-                    if field in item and len(encoded(item[field])) > limit:
-                        item[field] = bounded_json_text(item[field], limit); changed = True
-            if changed:
-                evidence['progress_truncated'] = True; continue
-            source = evidence.get('source_diagnostics', {})
-            for field, limit in (('stack',1500),('context',250)):
-                if field in source and len(encoded(source[field])) > limit:
-                    source[field] = bounded_json_text(source[field], limit)
-                    source[field + '_truncated'] = True; changed = True
-            if changed: continue
+        if not shrink_failure_evidence(evidence):
             raise ValueError('Failure metadata exceeds evidence budget')
-        evidence['console'][name] = bounded_text(evidence['console'][name], len(evidence['console'][name].encode())//2)
-        evidence['console_truncated'][name] = True
     return evidence
 
 
@@ -978,14 +988,9 @@ def export_evidence(report, head, directory):
             payload_sha256=report.get('payload_sha256'))
     artifact = json.loads(json.dumps(artifact))
     detail = artifact['normal_world'].get('failure_evidence', {})
-    console = detail.get('console', {})
     while len(encoded(artifact)) + 1 > EVIDENCE_LIMIT:
         artifact['truncated'] = True
-        if isinstance(console, dict) and any(isinstance(text, str) and text for text in console.values()):
-            name = max(console, key=lambda name: len(console[name]) if isinstance(console[name], str) else 0)
-            console[name] = bounded_text(console[name], len(console[name].encode())//2)
-            detail.setdefault('console_truncated', {})[name] = True
-        else:
+        if not shrink_failure_evidence(detail):
             raise ValueError('Structured native evidence exceeds artifact budget')
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)

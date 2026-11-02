@@ -55,6 +55,12 @@ def read(path,limit=1024**2):
         return data
 
 
+def read_virtual(path,limit=1024**2):
+    with Path(path).open('rb') as stream: data=stream.read(limit+1)
+    if len(data)>limit: raise ValueError('Virtual file budget exceeded')
+    return data
+
+
 def prepare(output,source,ordinary,commit,base):
     """Pure packaging from a clean source commit; no installation or setup commands."""
     if not all(re.fullmatch('[a-f0-9]{40}',value) for value in (commit,base)): raise ValueError('Full source pins required')
@@ -76,6 +82,8 @@ def prepare(output,source,ordinary,commit,base):
         for key,value in replacements.items(): text=text.replace(key,value)
         text=text.replace('/etc/eqemu-validator/config.json',CONFIG)
         text=text.replace('AppArmorProfile=eqemu-validator','AppArmorProfile=eqemu-validator-profiling')
+        if name=='service':
+            text=text.replace('ReadWritePaths='+STATE,'ReadWritePaths='+STATE+' '+SHARED_LOCK)
         if name=='apparmor':
             text=text.replace('profile eqemu-validator ', 'profile eqemu-validator-profiling ')
             text=text.replace('peer=eqemu-validator,','peer=eqemu-validator-profiling,')
@@ -136,6 +144,7 @@ class Host:
     def info(self,path): return path.lstat()
     def chown(self,path,uid,gid): os.chown(path,uid,gid)
     def run(self,args): return subprocess.check_output(args,stderr=subprocess.STDOUT,timeout=30,text=True)
+    def account(self,name): return pwd.getpwnam(name)
     def processes(self):
         for path in Path('/proc').glob('[0-9]*/comm'):
             try:
@@ -173,6 +182,9 @@ def retained(host):
         if not path.exists(): raise ValueError('Expected retained selection configuration missing')
         protected(host,path)
         config=json.loads(read(path))
+        state=host.path(config['state_dir'])
+        if (state/'active.json').exists() or (state/'active.json').is_symlink():
+            raise ValueError('Retained worker has active or unconfirmed cleanup state')
         code=host.path(config['code_dir'])
         entries=list(code.rglob('*'))
         if len(entries)>256 or any(item.is_symlink() for item in entries): raise ValueError('Retained code tree is unknown or oversized')
@@ -210,13 +222,43 @@ def plan(files,config):
     return targets
 
 
+def temporary(path):
+    return path.with_name(path.name+'.profiling-tmp')
+
+
+def check_temporary(host,path,data,mode):
+    if path.exists() or path.is_symlink():
+        protected(host,path)
+        if stat.S_IMODE(host.info(path).st_mode) not in (0o600,mode) or not data.startswith(read(path)):
+            raise ValueError('Unrecognized partial publication file')
+
+
+def publish(host,path,data,mode):
+    """Publish complete bytes with no replacement; partial temporary files are owned."""
+    pending=temporary(path)
+    check_temporary(host,pending,data,mode)
+    if pending.exists(): pending.unlink()
+    fd=os.open(pending,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'wb') as stream:
+        stream.write(data);stream.flush();os.fsync(stream.fileno())
+    pending.chmod(mode);host.chown(pending,0,0)
+    os.link(pending,path,follow_symlinks=False)
+    # The link inherits ownership. Record it too in synthetic filesystem tests.
+    host.chown(path,0,0)
+    pending.unlink()
+
+
 def operate(host,directory,expected,operation):
     package,files,config=load_package(directory,expected)
+    if read(Path(__file__))!=files['operator.py']: raise ValueError('Use the exact reviewed packaged operator')
     ordinary_path=host.path(ORDINARY);protected(host,ordinary_path)
     ordinary=json.loads(read(ordinary_path))
     if (ordinary.get('state_dir')!='/var/lib/eqemu-validator'
             or any(config.get(key)!=ordinary.get(key) for key in ('user','worker_uid','worker_gid','submitter','base_image','version'))):
         raise ValueError('Ordinary identity changed after packaging')
+    account=host.account(config['user']);submitter=host.account(config['submitter'])
+    if account.pw_uid==0 or account.pw_uid!=config['worker_uid'] or account.pw_gid!=config['worker_gid'] or submitter.pw_uid in (0,account.pw_uid):
+        raise ValueError('Configured worker/submitter account identity mismatch')
     targets=plan(files,config)
     marker=host.path(JOURNAL)
     with shared_lock(host,config):
@@ -230,13 +272,15 @@ def operate(host,directory,expected,operation):
         release=host.path(config['code_dir'])
         if release.exists():
             expected_paths={host.path(path) for path in targets if path.startswith(config['code_dir']+'/')}
+            expected_paths |= {temporary(path) for path in expected_paths}
+            expected_dirs={parent for path in expected_paths for parent in path.parents if parent.is_relative_to(release)}
             entries=list(release.rglob('*'))
-            if len(entries)>128 or any(p.is_symlink() or p.is_file() and p not in expected_paths for p in entries):
+            if len(entries)>128 or any(p.is_symlink() or p.is_file() and p not in expected_paths or p.is_dir() and p not in expected_dirs for p in entries):
                 raise ValueError('Unknown asset in profiling release')
         if operation=='apply':
             if journal is None:
                 # Refuse collisions before acquiring ownership of any publication.
-                if any(host.path(path).exists() or host.path(path).is_symlink() for path in targets) or host.path(STATE).exists() or host.path(config['code_dir']).exists():
+                if any(host.path(path).exists() or host.path(path).is_symlink() or temporary(host.path(path)).exists() for path in targets) or host.path(STATE).exists() or host.path(config['code_dir']).exists():
                     raise ValueError('Additive publication collision; no replacement allowed')
                 journal=dict(version=1,package_sha256=expected,retained=before)
                 protected(host,marker.parent,regular=False)
@@ -250,13 +294,13 @@ def operate(host,directory,expected,operation):
                     parent.mkdir(mode=0o755);host.chown(parent,0,0)
                 protected(host,dest.parent,mode=0o755,regular=False)
                 mode=0o755 if '/scripts/' in path else 0o644
+                check_temporary(host,temporary(dest),data,mode)
                 if dest.exists() or dest.is_symlink():
                     protected(host,dest,mode=mode)
                     if read(dest)!=data: raise ValueError('Partial publication drift; refusing replacement')
+                    if temporary(dest).exists(): temporary(dest).unlink()
                 else:
-                    fd=os.open(dest,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,mode)
-                    with os.fdopen(fd,'wb') as stream: stream.write(data);stream.flush();os.fsync(stream.fileno())
-                    dest.chmod(mode);host.chown(dest,0,0)
+                    publish(host,dest,data,mode)
             state=host.path(STATE)
             if not state.exists():
                 state.mkdir(mode=0o700);host.chown(state,config['worker_uid'],config['worker_gid'])
@@ -268,7 +312,7 @@ def operate(host,directory,expected,operation):
                 if read(dest)!=data: raise ValueError('Published profiling asset changed')
             protected(host,host.path(STATE),uid=config['worker_uid'],mode=0o700,regular=False)
             host.run(['/usr/bin/systemd-analyze','verify',str(host.path('/etc/systemd/system/'+SERVICE)),str(host.path('/etc/systemd/system/'+SOCKET))])
-            host.run(['/usr/sbin/apparmor_parser','--skip-kernel-load',str(host.path(POLICY))])
+            host.run(['/usr/sbin/apparmor_parser','--skip-kernel-load','--skip-cache',str(host.path(POLICY))])
             if operation=='activate':
                 host.run(['/usr/bin/systemctl','daemon-reload'])
                 host.run(['/usr/sbin/apparmor_parser','-r',str(host.path(POLICY))])
@@ -282,14 +326,16 @@ def operate(host,directory,expected,operation):
             host.run(['/usr/bin/systemctl','stop',SOCKET])
             # Policy may never have been loaded during a partial publication.
             profiles=host.path('/sys/kernel/security/apparmor/profiles')
-            if profiles.exists() and 'eqemu-validator-profiling (enforce)' in read(profiles).decode().splitlines():
+            if profiles.exists() and 'eqemu-validator-profiling (enforce)' in read_virtual(profiles).decode().splitlines():
                 host.run(['/usr/sbin/apparmor_parser','-R',str(host.path(POLICY))])
             for path,data in targets.items():
                 dest=host.path(path)
+                check_temporary(host,temporary(dest),data,0o755 if '/scripts/' in path else 0o644)
                 if dest.exists() or dest.is_symlink():
                     protected(host,dest,mode=0o755 if '/scripts/' in path else 0o644)
                     if read(dest)!=data: raise ValueError('Rollback refuses changed profiling asset')
             for path in targets:
+                temporary(host.path(path)).unlink(missing_ok=True)
                 host.path(path).unlink(missing_ok=True)
             directories={parent for path in targets for parent in host.path(path).parents if parent.is_relative_to(host.path(config['code_dir']))}
             for directory in sorted(directories,key=lambda p:len(p.parts),reverse=True):

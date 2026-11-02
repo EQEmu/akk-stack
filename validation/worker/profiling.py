@@ -15,6 +15,8 @@ import subprocess
 import sys
 import time
 
+sys.dont_write_bytecode = True
+
 from profile_artifacts import CHUNK, FILE_LIMIT, NAMES, TOTAL_LIMIT, canonical, frame
 
 MODES = ('timeline', 'heaptrack', 'perf')
@@ -219,6 +221,22 @@ def tool(args, *, output, stdin=None, seconds=30, prefix=(), diagnostics=None):
             try: os.killpg(proc.pid,signal.SIGKILL)
             except ProcessLookupError: pass
             proc.wait(timeout=5)
+
+
+def perf_limits():
+    """Lower only: an unprivileged child cannot raise its observer's hard ceiling."""
+    _,hard=resource.getrlimit(resource.RLIMIT_FSIZE)
+    limit=FILE_LIMIT if hard==resource.RLIM_INFINITY else min(FILE_LIMIT,hard)
+    resource.setrlimit(resource.RLIMIT_FSIZE,(limit,limit))
+
+
+def perf_preflight(directory,uid,prefix):
+    """Run under the native identity with a finite directory that identity can write."""
+    directory=Path(directory);directory.mkdir(mode=0o700)
+    os.chown(directory,uid,-1)
+    return tool(['/usr/bin/perf','record','-e','task-clock:u','-F','99','--call-graph','fp,32',
+        '--no-buildid-cache','-o',str(directory/'perf.data'),'--','/bin/true'],
+        prefix=prefix,output=directory.parent/'perf-preflight.log')
 
 
 class Session:

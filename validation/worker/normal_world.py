@@ -464,13 +464,11 @@ def observe(binary_dir, server, control, profile_config=None):
                 processes.append(subprocess.Popen([str(binary_dir / name), *args], cwd=cwd, env=env,
                     stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT))
                 if profile and profile['mode']=='perf':
-                    from profiling import FILE_LIMIT
-                    def limits():
-                        resource.setrlimit(resource.RLIMIT_FSIZE,(FILE_LIMIT,FILE_LIMIT))
+                    from profiling import perf_limits
                     profilers.append(subprocess.Popen(['/usr/bin/perf','record','-e','task-clock:u','-F','99',
                         '--call-graph','fp,32','--no-buildid-cache','-m','64','-o',
                         str(Path(profile['directory'])/(name+'.perf.data')),'-p',str(processes[-1].pid)],
-                        stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,preexec_fn=limits))
+                        stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,preexec_fn=perf_limits))
         while True:
             guard()
             if responsive():
@@ -661,9 +659,8 @@ def run(build, identity):
                     warmup='readiness probe',repetitions=1,baseline_seconds=BASELINE_SECONDS,comparison=False),
                     fixture_manifest_sha256=fixture['manifest_sha256'])).start()
             if mode=='perf':
-                check=tool(['/usr/bin/perf','record','-e','task-clock:u','-F','99','--call-graph','fp,32',
-                    '--no-buildid-cache','-o',str(build.WORK/'perf-preflight.data'),'--','/bin/true'],
-                    prefix=prefix, output=build.WORK/'perf-preflight.log')
+                from profiling import perf_preflight
+                check=perf_preflight(build.WORK/'perf-preflight',account.pw_uid,prefix)
                 if check: raise RuntimeError('Requested perf mode unavailable for guest event task-clock:u under native identity')
             profiling_session.stage('shared-memory','started')
         runtime.command('normal-shared-memory', [*prefix, str(build.WORK / 'build/bin/shared_memory')], cwd=server, timeout=180)
@@ -679,8 +676,11 @@ def run(build, identity):
                 if ready:
                     raise RuntimeError('Duplicate normal-world readiness phase')
                 ready = True
-                if profiling_session: profiling_session.stage('ready','completed')
+                if profiling_session:
+                    profiling_session.stage('startup','completed')
+                    profiling_session.stage('ready','completed')
                 build.emit({'kind': 'stage', 'name': 'normal-world-ready', 'state': 'started'})
+        if profiling_session: profiling_session.stage('startup','started')
         output = runtime.command('normal-world', [*prefix, '/usr/bin/python3', '/opt/normal_world.py',
                                   str(build.WORK / 'build/bin'), str(server), control or 'positive',
                                   *([str(profiling_session.directory/'config.json')] if profiling_session else [])],

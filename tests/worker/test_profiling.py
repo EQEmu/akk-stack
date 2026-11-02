@@ -208,7 +208,6 @@ class Processes(unittest.TestCase):
                     if child.poll() is None: child.kill(); child.wait(timeout=3)
 
 
-if __name__=='__main__': unittest.main()
 
 
 class ProfileInputs(unittest.TestCase):
@@ -304,3 +303,26 @@ class WorkerTransport(unittest.TestCase):
                     client.exchange(path,request,profile_output=self.root/'client-raw')
             finally: thread.join(3)
         self.assertEqual((self.root/'client-raw/timeline.jsonl').read_text(),'partial\n')
+
+
+class PerfRegressions(unittest.TestCase):
+    def test_preflight_owns_a_writable_native_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            def run(args,**kwargs):
+                directory=root/'preflight'
+                self.assertEqual(directory.stat().st_uid,os.getuid())
+                self.assertEqual(directory.stat().st_mode&0o777,0o700)
+                self.assertEqual(args[args.index('-o')+1],str(directory/'perf.data'))
+                self.assertEqual(kwargs['prefix'],('/native-prefix',))
+                return 17
+            with patch.object(profiling,'tool',side_effect=run):
+                self.assertEqual(profiling.perf_preflight(root/'preflight',os.getuid(),('/native-prefix',)),17)
+
+    def test_perf_launch_never_raises_inherited_hard_limit(self):
+        code='import resource,sys; sys.path.insert(0,'+repr(str(ROOT/'validation/worker'))+'); import profiling; resource.setrlimit(resource.RLIMIT_FSIZE,(1048576,1048576)); profiling.perf_limits(); print(resource.getrlimit(resource.RLIMIT_FSIZE))'
+        output=subprocess.check_output([sys.executable,'-B','-c',code],text=True)
+        self.assertEqual(output.strip(),'(1048576, 1048576)')
+
+
+if __name__=='__main__': unittest.main()

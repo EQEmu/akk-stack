@@ -32,6 +32,9 @@ class FakeHost(release.Host):
         if args[1]=='list-units': return 'eqemu-validator@1.service loaded active running\n' if self.active else ''
         return ''
     def processes(self): pass
+    def account(self,name):
+        from types import SimpleNamespace
+        return SimpleNamespace(pw_uid=os.getuid() if name=='worker' else os.getuid()+2,pw_gid=os.getgid())
 
 
 class Publication(unittest.TestCase):
@@ -150,6 +153,22 @@ class Publication(unittest.TestCase):
             with self.assertRaises(FileNotFoundError): contract.verify_release(value,lambda p:p)
             path.write_bytes(old)
 
+    def test_interrupted_temporary_file_is_reversible_without_partial_final_file(self):
+        original=release.publish
+        once=[False]
+        def interrupt(host,path,data,mode):
+            if not once[0]:
+                once[0]=True
+                pending=release.temporary(path);pending.write_bytes(data[:7]);pending.chmod(0o600);host.chown(pending,0,0)
+                self.assertFalse(path.exists())
+                raise RuntimeError('interrupted finite temporary write')
+            return original(host,path,data,mode)
+        with patch.object(release,'publish',side_effect=interrupt):
+            with self.assertRaisesRegex(RuntimeError,'temporary'): self.operation('apply')
+        self.operation('rollback');self.operation('rollback')
+        self.assertEqual(release.retained(self.host),self.before)
+        self.operation('apply');self.operation('verify')
+
 
 class RuntimeSelection(unittest.TestCase):
     def test_profile_readiness_has_exact_label_and_ordinary_readiness_is_unchanged(self):
@@ -185,3 +204,31 @@ class RuntimeSelection(unittest.TestCase):
                 try:
                     with self.assertRaises(RuntimeError): runtime.acquire(old)
                 finally: os.close(fd)
+
+
+class PublicationRegressions(unittest.TestCase):
+    setUp=Publication.setUp
+    operation=Publication.operation
+    # Inherit the same synthetic publication contract for these targeted paths.
+    def test_systemd_grants_only_exact_existing_shared_lock_write_path(self):
+        _,files,_=release.load_package(self.package,self.receipt['package_sha256'])
+        lines=files['service'].decode().splitlines()
+        self.assertIn('ProtectSystem=strict',lines)
+        self.assertIn('ReadWritePaths='+release.STATE+' '+release.SHARED_LOCK,lines)
+        self.assertNotIn('ReadWritePaths=/var/lib/eqemu-validator',lines)
+
+    def test_zero_size_virtual_profile_table_allows_policy_rollback(self):
+        self.operation('apply')
+        path=self.host.path('/sys/kernel/security/apparmor/profiles')
+        path.parent.mkdir(parents=True);path.touch()
+        self.assertEqual(path.stat().st_size,0)
+        original=Path.open
+        class Virtual:
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+            def read(self,limit): return b'eqemu-validator-profiling (enforce)\n'
+        # No filesystem-size comparison is valid for securityfs. A bounded
+        # stream is sufficient even when a virtual file reports st_size=0.
+        with patch.object(Path,'open',side_effect=lambda p,*a,**kw:Virtual() if p==path else original(p,*a,**kw),autospec=True):
+            self.operation('rollback')
+        self.assertTrue(any(call[0]=='/usr/sbin/apparmor_parser' and call[1]=='-R' for call in self.host.calls))

@@ -349,9 +349,6 @@ def stop_process(process):
 
 
 def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, build_result=None, format_result=None, quick_result=None):
-    process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               cwd=scratch, start_new_session=True, close_fds=True,
-                               env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': str(scratch)})
     output = bytearray()
     pending = bytearray()
     discarding = False
@@ -359,17 +356,21 @@ def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, 
     profile_sink = None
     profile_error = None
     profile_mode = None
-    if build_result is not None and (scratch/'profile-requested').exists():
-        from profile_artifacts import Sink
-        profile_sink=Sink(scratch.parent/'profiles')
-        profile_request=json.loads((scratch/'profile-requested').read_text())
-        profile_mode=profile_request['profiling']
     started_at = time.monotonic()
+    process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               cwd=scratch, start_new_session=True, close_fds=True,
+                               env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': str(scratch)})
     try:
         if on_started is not None:
-            if process.poll() is not None:
-                raise RuntimeError('QEMU exited before ownership was recorded')
             on_started(process.pid)
+        if process.poll() is not None:
+            raise RuntimeError('QEMU exited after launch ownership was recorded')
+        # All post-launch initialization is covered by owned process cleanup.
+        if build_result is not None and (scratch/'profile-requested').exists():
+            from profile_artifacts import Sink
+            profile_sink=Sink(scratch.parent/'profiles')
+            profile_request=json.loads((scratch/'profile-requested').read_text())
+            profile_mode=profile_request['profiling']
         os.set_blocking(process.stdout.fileno(), False)
         with selectors.DefaultSelector() as selector, log.open('xb') as stream:
             selector.register(process.stdout, selectors.EVENT_READ)
@@ -430,8 +431,12 @@ def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, 
                 detail = output[-900:].decode(errors='replace').strip()
                 raise RuntimeError('QEMU exited ' + str(code) + ': ' + detail)
     finally:
-        stop_process(process)
-        process.stdout.close()
+        try:
+            stop_process(process)
+        finally:
+            try: process.stdout.close()
+            except BaseException as error:
+                raise CleanupError('Owned serial pipe cleanup could not be confirmed') from error
         if profile_sink is not None:
             build_result['profile_transport']=dict(artifacts=profile_sink.inventory(),export_error=profile_error,
                 complete=False,partial=True)

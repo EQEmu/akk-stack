@@ -429,6 +429,100 @@ class ReviewR4ExportRegressions(unittest.TestCase):
         self.assertIn(b'timeline.jsonl',self.client.recv(4096))
 
 
+class ReviewR7InitializationRegression(unittest.TestCase):
+    def test_callback_failure_early_exit_and_uncertain_cleanup_close_launched_pipe(self):
+        from unittest.mock import Mock
+        for failure in ('callback','early-exit','stop'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)
+                process=Mock(pid=4321);process.poll.return_value=1 if failure=='early-exit' else None
+                started=Mock(side_effect=ValueError('callback failure') if failure=='callback' else None)
+                with patch.object(runtime.subprocess,'Popen',return_value=process), \
+                        patch.object(runtime,'disconnected',return_value=True), \
+                        patch.object(runtime.os,'set_blocking'), \
+                        patch.object(runtime.selectors,'DefaultSelector'), \
+                        patch.object(runtime,'stop_process',side_effect=runtime.CleanupError('unconfirmed') if failure=='stop' else None) as stop:
+                    with self.assertRaises((ValueError,RuntimeError)):
+                        runtime.supervise(['/never-execute'],root,root/'serial',Mock(),time.monotonic()+1,'a'*32,started,{})
+                started.assert_called_once_with(4321)
+                stop.assert_called_once_with(process)
+                process.stdout.close.assert_called_once()
+
+    def test_profile_initialization_failure_records_ownership_and_reaps_launched_child(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);scratch=root/'scratch';scratch.mkdir()
+            (scratch/'profile-requested').write_text('{invalid-json')
+            process=Mock(pid=4321);process.poll.return_value=None
+            started=Mock()
+            with patch.object(runtime.subprocess,'Popen',return_value=process), \
+                    patch.object(runtime,'stop_process') as stop:
+                with self.assertRaises(json.JSONDecodeError):
+                    runtime.supervise(['/never-execute'],scratch,root/'serial',Mock(),time.monotonic()+1,'a'*32,started,{})
+            started.assert_called_once_with(4321)
+            stop.assert_called_once_with(process)
+            process.stdout.close.assert_called_once()
+
+    def test_sink_initialization_failure_preserves_vm_started_and_confirmed_cleanup(self):
+        import test_build
+        test_build.BuildRuntime.setUp(self)
+        request=dict(test_build.BuildRuntime.build_request(self),profiling='timeline')
+        self.client.sendall(b'ISO')
+        stopped=[]
+        original=runtime.stop_process
+        def stop(process):
+            original(process);stopped.append((process.pid,process.returncode))
+        with patch.object(runtime,'resource_state',return_value={'memory.max':str(6*1024**3)}), \
+                patch.object(artifacts,'Sink',side_effect=OSError('trusted sink initialization failure')), \
+                patch.object(runtime,'stop_process',side_effect=stop):
+            result=runtime.run_vm(self.value,self.server,build=request)
+        self.assertEqual(result['exit_code'],2)
+        self.assertTrue(result['vm_started'])
+        self.assertTrue(result['cleanup_complete'])
+        owned=[entry for entry in stopped if entry[0]==result['qemu_pid']]
+        self.assertEqual(len(owned),1)
+        with self.assertRaises(ProcessLookupError): os.kill(owned[0][0],0)
+        self.assertFalse((self.state/'active.json').exists())
+
+    def test_ownership_record_failure_still_reaps_and_reports_launched(self):
+        import test_build
+        test_build.BuildRuntime.setUp(self)
+        request=dict(test_build.BuildRuntime.build_request(self),profiling='timeline')
+        self.client.sendall(b'ISO')
+        original=runtime.atomic_json
+        def record(path,value):
+            if path.name=='active.json' and value.get('qemu_pid') is not None:
+                raise OSError('ownership record failure')
+            return original(path,value)
+        with patch.object(runtime,'resource_state',return_value={'memory.max':str(6*1024**3)}), \
+                patch.object(runtime,'atomic_json',side_effect=record):
+            result=runtime.run_vm(self.value,self.server,build=request)
+        self.assertTrue(result['vm_started'])
+        self.assertEqual(result['exit_code'],2)
+        self.assertTrue(result['cleanup_complete'])
+        with self.assertRaises(ProcessLookupError): os.kill(result['qemu_pid'],0)
+
+    def test_postlaunch_initialization_with_unconfirmed_reap_preserves_active_scratch(self):
+        import test_build
+        test_build.BuildRuntime.setUp(self)
+        request=dict(test_build.BuildRuntime.build_request(self),profiling='timeline')
+        self.client.sendall(b'ISO')
+        original=runtime.stop_process
+        def uncertain(process):
+            original(process)
+            if Path(process.args[0])==Path(runtime.QEMU):
+                raise runtime.CleanupError('trusted unconfirmed reap fixture')
+        with patch.object(runtime,'resource_state',return_value={'memory.max':str(6*1024**3)}), \
+                patch.object(artifacts,'Sink',side_effect=OSError('sink init failure')), \
+                patch.object(runtime,'stop_process',side_effect=uncertain):
+            result=runtime.run_vm(self.value,self.server,build=request)
+        self.assertTrue(result['vm_started'])
+        self.assertEqual(result['exit_code'],2)
+        self.assertFalse(result['cleanup_complete'])
+        self.assertTrue((self.state/'active.json').is_file())
+        self.assertTrue((self.state/result['run_id']/'scratch').is_dir())
+
+
 class ReviewR6ClientExportRegression(unittest.TestCase):
     def setUp(self):
         import test_build

@@ -120,6 +120,7 @@ def sampler(config):
         expected[(info.st_dev, info.st_ino)] = name
     selector = selectors.DefaultSelector()
     pending = {}
+    discarding = set()
     fifo_fds = []
     if config['mode'] == 'heaptrack':
         for name in config['binaries']:
@@ -130,10 +131,15 @@ def sampler(config):
         for key,_ in events:
             try: block=os.read(key.fd,65536)
             except BlockingIOError: continue
-            name=key.data;data=pending[name]+block
+            name=key.data
+            if name in discarding:
+                boundary=block.find(b'\n')
+                if boundary<0: continue
+                block=block[boundary+1:];discarding.remove(name)
+            data=pending[name]+block
             rows=data.split(b'\n');pending[name]=rows.pop()
             if len(pending[name])>16384:
-                writer.truncated.add(name+'.heaptrack.raw');pending[name]=b''
+                writer.truncated.add(name+'.heaptrack.raw');pending[name]=b'';discarding.add(name)
             for row in rows:
                 if row[:1] in (b'v',b'x',b'I',b'c',b'R',b't',b'+',b'-',b'm'):
                     if len(row)>16384: writer.truncated.add(name+'.heaptrack.raw')
@@ -185,7 +191,7 @@ def sampler(config):
         while fifo_fds and time.monotonic()<deadline:
             if not drain(0): break
         remainder=bool(fifo_fds and selector.select(0))
-        partial_records=sorted(name for name,data in pending.items() if data)
+        partial_records=sorted({name for name,data in pending.items() if data}|discarding)
         allocation_complete=not remainder and not partial_records
         if not allocation_complete: writer.truncated.add('allocation-finalization')
         summary = dict(version=1, mode=config['mode'], sampler_complete=stop and allocation_complete, stop_reason='requested' if stop else 'deadline',

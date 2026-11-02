@@ -627,6 +627,34 @@ class ReviewR6ClientExportRegression(unittest.TestCase):
 
 
 class ReviewR10FifoFinalizationRegression(unittest.TestCase):
+    def test_oversized_private_row_discards_its_suffix_through_next_newline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory=Path(tmp);os.mkfifo(directory/'zone.fifo')
+            config=directory/'config.json'
+            config.write_text(json.dumps(dict(mode='heaptrack',directory=tmp,binaries={'zone':'/bin/true'},uid=os.getuid(),deadline=time.monotonic()+5)))
+            process=subprocess.Popen([sys.executable,'-B',str(ROOT/'validation/worker/profiling.py'),'sample',str(config)],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            try:
+                deadline=time.monotonic()+2
+                while not (directory/'sampler.ready').exists():
+                    if process.poll() is not None or time.monotonic()>deadline: self.fail('sampler did not become ready')
+                    time.sleep(.01)
+                fd=os.open(directory/'zone.fifo',os.O_WRONLY)
+                try:
+                    prefix=b'X '+b'a'*20000
+                    while prefix: prefix=prefix[os.write(fd,prefix):]
+                    time.sleep(.3)
+                    os.write(fd,b'+ private-argv-suffix\n- final-free\n')
+                finally: os.close(fd)
+                process.terminate();out,err=process.communicate(timeout=4)
+                self.assertEqual(process.returncode,0,err)
+                raw=(directory/'zone.heaptrack.raw').read_bytes()
+                self.assertNotIn(b'private-argv',raw)
+                self.assertIn(b'- final-free\n',raw)
+                self.assertIn('zone.heaptrack.raw',json.loads((directory/'summary.json').read_text())['truncated'])
+            finally:
+                if process.poll() is None: process.kill()
+                process.communicate(timeout=3)
+
     def test_stop_immediately_after_final_write_drains_complete_rows_and_labels_partial_tail(self):
         for tail,budget in ((b'- final-free\n',1),(b'- incomplete-free',1),(b'- final-free\n',0)):
             with self.subTest(tail=tail,budget=budget), tempfile.TemporaryDirectory() as tmp:

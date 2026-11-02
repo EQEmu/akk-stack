@@ -626,6 +626,37 @@ class ReviewR6ClientExportRegression(unittest.TestCase):
         self.assertTrue(complete['result_receipt']['client_export']['error_present'])
 
 
+class ReviewR10FifoFinalizationRegression(unittest.TestCase):
+    def test_stop_immediately_after_final_write_drains_complete_rows_and_labels_partial_tail(self):
+        for tail,budget in ((b'- final-free\n',1),(b'- incomplete-free',1),(b'- final-free\n',0)):
+            with self.subTest(tail=tail,budget=budget), tempfile.TemporaryDirectory() as tmp:
+                directory=Path(tmp);os.mkfifo(directory/'zone.fifo')
+                config=dict(mode='heaptrack',directory=tmp,binaries={'zone':'/bin/true'},uid=os.getuid(),deadline=time.monotonic()+3)
+                prior={sig:signal.getsignal(sig) for sig in (signal.SIGTERM,signal.SIGINT)}
+                def final_write():
+                    fd=os.open(directory/'zone.fifo',os.O_WRONLY|os.O_NONBLOCK)
+                    try: os.write(fd,b'X private-argv\n'+tail)
+                    finally: os.close(fd)
+                    signal.raise_signal(signal.SIGTERM)
+                    return {}
+                try:
+                    with patch.object(profiling,'pressure',side_effect=final_write), \
+                            patch.object(profiling,'FINAL_DRAIN_SECONDS',budget): profiling.sampler(config)
+                finally:
+                    for sig,handler in prior.items(): signal.signal(sig,handler)
+                summary=json.loads((directory/'summary.json').read_text())
+                raw=(directory/'zone.heaptrack.raw').read_bytes() if (directory/'zone.heaptrack.raw').exists() else b''
+                self.assertNotIn(b'private-argv',raw)
+                complete=tail.endswith(b'\n') and budget>0
+                self.assertEqual(summary['allocation_drain']['complete'],complete)
+                self.assertEqual(summary['sampler_complete'],complete)
+                if complete:
+                    self.assertEqual(raw,tail)
+                    self.assertEqual(summary['truncated'],[])
+                else:
+                    self.assertIn('allocation-finalization',summary['truncated'])
+
+
 class ReviewR8CollectorShutdownRegression(unittest.TestCase):
     def test_real_same_group_collector_exits_on_target_death_before_group_cleanup(self):
         import normal_world

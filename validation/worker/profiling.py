@@ -21,6 +21,7 @@ from profile_artifacts import CHUNK, FILE_LIMIT, NAMES, TOTAL_LIMIT, canonical, 
 
 MODES = ('timeline', 'heaptrack', 'perf')
 INTERVAL = .2
+FINAL_DRAIN_SECONDS = 1.0
 TOOLS = {'heaptrack': ('/usr/lib/heaptrack/libheaptrack_preload.so',
                       '/usr/lib/heaptrack/libexec/heaptrack_interpret', '/usr/bin/heaptrack_print'),
          'perf': ('/usr/bin/perf',)}
@@ -124,6 +125,20 @@ def sampler(config):
         for name in config['binaries']:
             fd = os.open(directory / (name + '.fifo'), os.O_RDWR | os.O_NONBLOCK)
             fifo_fds.append(fd); selector.register(fd, selectors.EVENT_READ, name); pending[name] = b''
+    def drain(timeout):
+        events=selector.select(timeout)
+        for key,_ in events:
+            try: block=os.read(key.fd,65536)
+            except BlockingIOError: continue
+            name=key.data;data=pending[name]+block
+            rows=data.split(b'\n');pending[name]=rows.pop()
+            if len(pending[name])>16384:
+                writer.truncated.add(name+'.heaptrack.raw');pending[name]=b''
+            for row in rows:
+                if row[:1] in (b'v',b'x',b'I',b'c',b'R',b't',b'+',b'-',b'm'):
+                    if len(row)>16384: writer.truncated.add(name+'.heaptrack.raw')
+                    else: writer.append(name+'.heaptrack.raw',row+b'\n')
+        return bool(events)
     (directory/'sampler.ready').touch()
     try:
         while not stop and time.monotonic() < config['deadline']:
@@ -162,18 +177,20 @@ def sampler(config):
             # Drain allocation records independently of the observer. Strip Heaptrack's
             # X argv and S suppression records before any disk/console persistence.
             while time.monotonic() < end and not stop:
-                for key, _ in selector.select(max(0, end-time.monotonic())):
-                    name = key.data
-                    block = os.read(key.fd, 65536)
-                    data = pending[name] + block
-                    rows = data.split(b'\n'); pending[name] = rows.pop()
-                    if len(pending[name]) > 16384:
-                        writer.truncated.add(name+'.heaptrack.raw'); pending[name] = b''
-                    for row in rows:
-                        if len(row) <= 16384 and row[:1] in (b'v', b'x', b'I', b'c', b'R', b't', b'+', b'-', b'm'):
-                            writer.append(name+'.heaptrack.raw', row+b'\n')
+                drain(max(0,end-time.monotonic()))
                 if not fifo_fds: time.sleep(max(0, end-time.monotonic()))
-        summary = dict(version=1, mode=config['mode'], sampler_complete=stop, stop_reason='requested' if stop else 'deadline',
+        # Termination can arrive during process sampling, before its normal FIFO
+        # sweep. Drain already-flushed records even after stop has been requested.
+        deadline=time.monotonic()+FINAL_DRAIN_SECONDS
+        while fifo_fds and time.monotonic()<deadline:
+            if not drain(0): break
+        remainder=bool(fifo_fds and selector.select(0))
+        partial_records=sorted(name for name,data in pending.items() if data)
+        allocation_complete=not remainder and not partial_records
+        if not allocation_complete: writer.truncated.add('allocation-finalization')
+        summary = dict(version=1, mode=config['mode'], sampler_complete=stop and allocation_complete, stop_reason='requested' if stop else 'deadline',
+            allocation_drain=dict(complete=allocation_complete,budget_seconds=FINAL_DRAIN_SECONDS,queued_remainder=remainder,partial_records=partial_records,
+                scope='queued records at shutdown; future writes and complete native trace are not established'),
             samples=count, interval_seconds=INTERVAL, gap_count=gaps, maximum_gap_seconds=round(maximum_gap,6),
             processes=list(peaks.values()), truncated=sorted(writer.truncated),
             true_peak_known=False, overhead='sampler and selected profiler included; no overhead correction',
@@ -335,7 +352,7 @@ class Session:
         summary=json.loads((self.directory/'summary.json').read_text()) if (self.directory/'summary.json').is_file() else {}
         if error is None:
             if not summary.get('processes'): error='No target process sampled'
-            elif summary.get('sampler_complete') is not True: error='Independent sampling deadline reached'
+            elif summary.get('sampler_complete') is not True: error='Independent sampling or allocation finalization incomplete'
             elif summary.get('truncated'): error='Profile artifacts truncated'
         return dict(mode=self.mode,complete=error is None and summary.get('sampler_complete') is True and bool(summary.get('processes')) and not summary.get('truncated'),error=error,
                     sampler=summary,tools=self.tools,collector_exit_codes=collector_exit_codes,collector_finalization_error=collector_finalization_error,analysis_exit_codes=analysis,preflight=self.preflight,

@@ -117,6 +117,9 @@ Before the original transfer, the collection durably records receipt finalizatio
 as pending, partial and overall non-pass. Recovery repairs that receipt from the
 matching bounded outcome or preserves pending uncertainty and the active marker.
 Repeated receipt-write failure cannot turn an unknown transfer into success.
+Heaptrack shutdown drains queued FIFO records within a one-second budget using
+the same privacy filter. Queued remainder or a partial record marks finalization
+incomplete and non-pass. An empty queue does not prove a complete native trace.
 
 ## Offline tools
 

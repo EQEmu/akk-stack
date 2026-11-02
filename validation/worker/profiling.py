@@ -288,9 +288,9 @@ class Session:
         with path.open('ab') as stream:
             stream.write(canonical(dict(name=name,state=state,monotonic_ns=time.monotonic_ns()))+b'\n'); stream.flush()
 
-    def finish(self, collector_exit_codes=None):
+    def finish(self, collector_exit_codes=None, collector_finalization_error=None):
         error = ('Requested perf collector failed or did not finalize'
-                 if self.mode == 'perf' and (not isinstance(collector_exit_codes,list)
+                 if self.mode == 'perf' and (collector_finalization_error is not None or not isinstance(collector_exit_codes,list)
                      or len(collector_exit_codes)!=2 or any(type(code) is not int or code!=0 for code in collector_exit_codes)) else None)
         analysis = {}
         try:
@@ -338,7 +338,7 @@ class Session:
             elif summary.get('sampler_complete') is not True: error='Independent sampling deadline reached'
             elif summary.get('truncated'): error='Profile artifacts truncated'
         return dict(mode=self.mode,complete=error is None and summary.get('sampler_complete') is True and bool(summary.get('processes')) and not summary.get('truncated'),error=error,
-                    sampler=summary,tools=self.tools,collector_exit_codes=collector_exit_codes,analysis_exit_codes=analysis,preflight=self.preflight,
+                    sampler=summary,tools=self.tools,collector_exit_codes=collector_exit_codes,collector_finalization_error=collector_finalization_error,analysis_exit_codes=analysis,preflight=self.preflight,
                     lost_samples='not established for perf; inspect bounded report header and tool diagnostics',
                     trace_finalization='may be incomplete after native signal/cleanup; analysis success does not prove a complete trace')
 

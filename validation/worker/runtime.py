@@ -290,7 +290,7 @@ def cleanup(value):
             else:
                 recover_profile_identity(Path(value['state_dir']),record['run_id'],report)
             atomic_json(Path(value['state_dir']) / 'last-result.json', report)
-            if not report['scratch_removed']:
+            if not report['scratch_removed'] or report.get('profile_retention_complete') is False:
                 return 2  # Retain the active marker and scratch when process absence is uncertain.
             if (job / 'serial.log').exists():
                 os.replace(job / 'serial.log', Path(value['state_dir']) / 'last-serial.log')
@@ -722,7 +722,7 @@ def profile_receipt(report):
         native_cleanup_complete=flag(normal.get('cleanup_complete')),database_cleanup_complete=flag(normal.get('database_cleanup')),
         vm_cleanup_complete=flag(report.get('cleanup_complete')),
         client_export=dict(complete=flag(report.get('profile_client_export_complete')),
-            error_present=bool(report.get('profile_client_export_error'))),
+            error_present=bool(report.get('profile_client_export_error')) if type(report.get('profile_client_export_complete')) is bool else None),
         profiler=dict(mode=profile.get('mode') if profile.get('mode') in ('timeline','heaptrack','perf') else None,
             complete=flag(profile.get('complete')),error_present=bool(profile.get('error')),
             collector_exit_codes=[code(value) for value in collectors] if isinstance(collectors,list) and len(collectors)<=2 else None,
@@ -737,9 +737,8 @@ def retain_profiles(job,state,run_id,report):
     from profile_artifacts import inventory
     current=state/'last-profile'
     metadata=dict(version=1,run_id=run_id,files=inventory(job/'profiles'),
-        partial=profile_receipt(report)['transport']['complete'] is not True,
-        execution_exit_code=report.get('exit_code',2),
-        result_receipt=profile_receipt(report),
+        partial=True,receipt_finalization='pending',execution_exit_code=2,
+        result_receipt=dict(profile_receipt(report),overall_exit_code=2),
         retention='one collection, replaced by next profiling run; operator may delete sooner')
     # Rename the bytes and their identity together. Cleanup receipts may be replaced
     # later by ExecStopPost without making the collection unidentifiable.
@@ -759,7 +758,7 @@ def retained_profile(state,run_id):
     directory=state/'last-profile'
     files=inventory(directory)
     metadata=read_json(directory/'collection.json')
-    if not isinstance(metadata,dict) or set(metadata)!={'version','run_id','files','partial','execution_exit_code','result_receipt','retention'} or metadata.get('version')!=1:
+    if not isinstance(metadata,dict) or set(metadata)!={'version','run_id','files','partial','execution_exit_code','result_receipt','receipt_finalization','retention'} or metadata.get('version')!=1 or metadata['receipt_finalization'] not in ('pending','complete'):
         raise ValueError('Malformed retained profile identity')
     if metadata['run_id']!=run_id: return None
     if metadata['files']!=files: raise ValueError('Retained profile changed')
@@ -775,10 +774,15 @@ def refresh_profile_receipt(state,run_id,report):
     """Atomically attach the final client-transfer outcome to its retained bytes."""
     metadata=retained_profile(state,run_id)
     if metadata is None: raise ValueError('Profile identity changed during client export')
-    metadata.update(execution_exit_code=report['exit_code'],result_receipt=profile_receipt(report))
+    complete_profile_receipt(state,metadata,profile_receipt(report))
+    report['profile_artifacts']=metadata
+
+
+def complete_profile_receipt(state,metadata,receipt):
+    metadata.update(execution_exit_code=receipt['overall_exit_code'],result_receipt=receipt,
+        receipt_finalization='complete',partial=receipt['transport']['complete'] is not True)
     if len(json.dumps(metadata).encode())>16384: raise ValueError('Retained profile receipt oversized')
     atomic_json(state/'last-profile/collection.json',metadata)
-    report['profile_artifacts']=metadata
 
 
 def recover_profile_identity(state,run_id,report):
@@ -787,9 +791,20 @@ def recover_profile_identity(state,run_id,report):
     try:
         metadata=retained_profile(state,run_id)
         if metadata is None: return
+        if metadata['receipt_finalization']=='pending':
+            prior=read_json(state/'last-result.json',limit=65536)
+            if prior.get('run_id')!=run_id: raise ValueError('Pending profile receipt has no matching execution result')
+            receipt=prior.get('profile_pending_receipt') or profile_receipt(prior)
+            report['profile_pending_receipt']=receipt
+            report['profile_retention_complete']=False
+            if type(receipt.get('client_export',{}).get('complete')) is not bool:
+                raise ValueError('Original client transfer outcome remains unknown')
+            complete_profile_receipt(state,metadata,receipt)
+            report['profile_retention_complete']=True
         report['profile_artifacts']=dict(metadata,partial=True)
         report['profile_recovery']=dict(original_execution_exit_code=metadata['execution_exit_code'],partial=True)
     except (OSError,ValueError) as error:
+        report['profile_retention_complete']=False
         report['profile_recovery_error']=type(error).__name__
 
 

@@ -314,6 +314,22 @@ def owned_members():
     return result
 
 
+def finalize_collectors(processes,collectors):
+    """Let perf finish on target exit before exhaustive owned-group cleanup."""
+    try:
+        for process in processes:
+            if process.poll() is None:
+                try: process.terminate()
+                except ProcessLookupError: pass
+        deadline=time.monotonic()+10
+        for process in processes: process.wait(timeout=max(.01,deadline-time.monotonic()))
+        deadline=time.monotonic()+5
+        for collector in collectors: collector.wait(timeout=max(.01,deadline-time.monotonic()))
+    except Exception as error:
+        return type(error).__name__
+    return None
+
+
 def stop(processes, *, diagnostics=None):
     """Clean the exact owned session even when a native leader exited first."""
     def send(sig):
@@ -518,7 +534,11 @@ def observe(binary_dir, server, control, profile_config=None):
                 result['profile_processes']=dict(before_cleanup=[dict(name=name,pid=p.pid,returncode=p.poll()) for name,p in zip(('world','zone'),processes)],
                     traces_may_be_incomplete=True, reason='Native shutdown is owned by existing cleanup, which may terminate profilers before finalization')
             try:
-                result['cleanup_complete'] = stop(processes, diagnostics=cleanup)
+                try:
+                    if profilers:
+                        result['profile_processes']['perf_finalization_error']=finalize_collectors(processes,profilers)
+                finally:
+                    result['cleanup_complete'] = stop(processes, diagnostics=cleanup)
                 for p in profilers: p.wait(timeout=5)
                 if profile:
                     result['profile_processes']['after_cleanup']=[dict(name=name,pid=p.pid,returncode=p.poll()) for name,p in zip(('world','zone'),processes)]
@@ -734,7 +754,8 @@ def run(build, identity):
             if profiling_session:
                 try:
                     profile_result=profiling_session.finish(
-                        collector_exit_codes=(result or {}).get('profile_processes',{}).get('perf_exit_codes'))
+                        collector_exit_codes=(result or {}).get('profile_processes',{}).get('perf_exit_codes'),
+                        collector_finalization_error=(result or {}).get('profile_processes',{}).get('perf_finalization_error'))
                     if not profile_result['complete']:
                         error=error or 'Requested profiling incomplete: '+str(profile_result.get('error') or 'artifact truncated')
                 except Exception as exc:

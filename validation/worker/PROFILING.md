@@ -113,6 +113,10 @@ exports when no longer needed; root may remove the retained copy after export.
 The original client transfer has its own completion/error flags, atomically
 updated after that transfer. A later recovery export reports its own exit status
 without rewriting the original execution or transfer outcome.
+Before the original transfer, the collection durably records receipt finalization
+as pending, partial and overall non-pass. Recovery repairs that receipt from the
+matching bounded outcome or preserves pending uncertainty and the active marker.
+Repeated receipt-write failure cannot turn an unknown transfer into success.
 
 ## Offline tools
 

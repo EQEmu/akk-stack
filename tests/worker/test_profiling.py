@@ -1,5 +1,6 @@
 """Real trusted finite processes, independent sampler and bounded private transport."""
 import base64
+import contextlib
 import hashlib
 import io
 import json
@@ -354,8 +355,9 @@ class RecoveryRegression(unittest.TestCase):
         job=self.state/run_id;job.mkdir(mode=0o700);(job/'scratch').mkdir(mode=0o700)
         sink=artifacts.Sink(job/'profiles')
         sink.accept(dict(name='timeline.jsonl',offset=0,data=base64.b64encode(b'partial\n').decode()))
-        prior=dict(version=1,run_id=run_id,exit_code=2,cleanup_complete=False)
+        prior=dict(version=1,run_id=run_id,exit_code=2,cleanup_complete=False,profile_client_export_complete=False)
         runtime.retain_profiles(job,self.state,run_id,prior)
+        runtime.refresh_profile_receipt(self.state,run_id,prior)
         runtime.atomic_json(self.state/'last-result.json',prior)
         runtime.atomic_json(self.state/'active.json',dict(run_id=run_id,invocation_id='a'*32,control='build',qemu_pid=123))
         with patch.object(runtime,'service_processes',return_value=[os.getpid()]):
@@ -528,7 +530,7 @@ class ReviewR6ClientExportRegression(unittest.TestCase):
         import test_build
         test_build.BuildRuntime.setUp(self)
 
-    def test_disconnect_receipt_survives_last_result_replacement(self):
+    def run_disconnect(self,receipt_failure=False):
         import test_build
         from test_normal_world import baseline
         request=dict(test_build.BuildRuntime.build_request(self),profiling='timeline')
@@ -542,8 +544,13 @@ class ReviewR6ClientExportRegression(unittest.TestCase):
             return 0
         with patch.object(runtime,'resource_state',return_value={'memory.max':str(6*1024**3)}), \
                 patch.object(runtime,'supervise',side_effect=simulate), \
-                patch.object(artifacts,'send',side_effect=BrokenPipeError('secret text must not enter receipt')):
+                patch.object(artifacts,'send',side_effect=BrokenPipeError('secret text must not enter receipt')), \
+                (patch.object(runtime,'refresh_profile_receipt',side_effect=OSError('receipt write failed')) if receipt_failure else contextlib.nullcontext()):
             result=runtime.run_vm(self.value,self.server,build=request)
+        return result
+
+    def test_disconnect_receipt_survives_last_result_replacement(self):
+        result=self.run_disconnect()
         self.assertEqual(result['exit_code'],2)
         receipt=result['profile_artifacts']['result_receipt']
         self.assertEqual(receipt['overall_exit_code'],2)
@@ -565,11 +572,67 @@ class ReviewR6ClientExportRegression(unittest.TestCase):
         self.assertEqual(exported['execution_exit_code'],2)
         self.assertIn(b'timeline.jsonl',self.client.recv(4096))
 
+    def test_disconnect_and_receipt_write_failure_recovery_repairs_or_preserves_uncertainty(self):
+        result=self.run_disconnect(receipt_failure=True)
+        run_id=result['run_id']
+        self.assertFalse(result['profile_retention_complete'])
+        self.assertTrue((self.state/'active.json').exists())
+        pending=runtime.retained_profile(self.state,run_id)
+        self.assertEqual(pending['receipt_finalization'],'pending')
+        self.assertTrue(pending['partial'])
+        self.assertEqual(pending['execution_exit_code'],2)
+        self.assertIsNone(pending['result_receipt']['client_export']['complete'])
+        with patch.object(runtime,'service_processes',return_value=[os.getpid()]), \
+                patch.object(runtime,'complete_profile_receipt',side_effect=OSError('still unwritable')):
+            self.assertEqual(runtime.cleanup(self.value),2)
+        self.assertTrue((self.state/'active.json').exists())
+        self.assertEqual(runtime.retained_profile(self.state,run_id)['receipt_finalization'],'pending')
+        with patch.object(runtime,'service_processes',return_value=[os.getpid()]):
+            self.assertEqual(runtime.cleanup(self.value),0)
+        self.assertFalse((self.state/'active.json').exists())
+        repaired=runtime.retained_profile(self.state,run_id)
+        self.assertEqual(repaired['receipt_finalization'],'complete')
+        receipt=repaired['result_receipt']
+        self.assertEqual(receipt['overall_exit_code'],2)
+        self.assertEqual(receipt['workload_exit_code'],0)
+        self.assertFalse(receipt['client_export']['complete'])
+        self.assertTrue(receipt['client_export']['error_present'])
+        runtime.atomic_json(self.state/'last-result.json',dict(exit_code=0,scope='unrelated-smoke'))
+        self.client.sendall(json.dumps(dict(version=1,operation='profile-artifacts',run_id=run_id)).encode()+b'\n')
+        exported=runtime.request(self.server,self.value)
+        self.assertEqual(exported['result_receipt'],receipt)
+        self.assertIn(b'timeline.jsonl',self.client.recv(4096))
+
+
+class ReviewR8CollectorShutdownRegression(unittest.TestCase):
+    def test_real_same_group_collector_exits_on_target_death_before_group_cleanup(self):
+        import normal_world
+        script='''import json,os,sys,time,subprocess
+sys.path.insert(0,sys.argv[1]);import normal_world as normal
+native=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'])
+collector_code='''+repr('import os,sys,time\npid=int(sys.argv[1]);end=time.monotonic()+5\nwhile time.monotonic()<end:\n try: os.kill(pid,0)\n except ProcessLookupError: sys.exit(0)\n time.sleep(.02)\nsys.exit(1)')+'''
+collector=subprocess.Popen([sys.executable,'-c',collector_code,str(native.pid)])
+try:
+ error=normal.finalize_collectors([native],[collector])
+finally:
+ clean=normal.stop([native,collector])
+print(json.dumps(dict(error=error,clean=clean,collector=collector.returncode)))
+'''
+        process=subprocess.Popen([sys.executable,'-B','-c',script,str(ROOT/'validation/worker')],stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+        try:
+            out,err=process.communicate(timeout=15)
+            self.assertEqual(process.returncode,0,err)
+            self.assertEqual(json.loads(out),dict(error=None,clean=True,collector=0))
+        finally:
+            try: os.killpg(process.pid,signal.SIGKILL)
+            except ProcessLookupError: pass
+            process.wait(timeout=3)
+
 
 class ReviewR5CollectorRegression(unittest.TestCase):
     def test_failed_collector_cannot_pass_with_readable_analyzed_data(self):
         from unittest.mock import Mock
-        for codes in ([1,0],[-9,0],None,[],[None,0],[True,0]):
+        for codes in ([1,0],[-9,0],None,[],[None,0],[True,0],[0,0]):
             with self.subTest(codes=codes), tempfile.TemporaryDirectory() as tmp:
                 directory=Path(tmp)
                 (directory/'summary.json').write_text(json.dumps(dict(sampler_complete=True,processes=[{}],truncated=[])))
@@ -579,7 +642,7 @@ class ReviewR5CollectorRegression(unittest.TestCase):
                 session.config={'binaries':{'world':{},'zone':{}}}
                 session.sampler=Mock(returncode=0);session.exporter=Mock(returncode=0);session.stage=Mock()
                 with patch.object(profiling,'tool',return_value=0) as analyze:
-                    result=session.finish(collector_exit_codes=codes)
+                    result=session.finish(collector_exit_codes=codes,collector_finalization_error='TimeoutExpired' if codes==[0,0] else None)
                 self.assertFalse(result['complete'])
                 self.assertIn('collector',result['error'])
                 self.assertEqual(analyze.call_count,2)

@@ -733,7 +733,8 @@ def run(build, identity):
         finally:
             if profiling_session:
                 try:
-                    profile_result=profiling_session.finish()
+                    profile_result=profiling_session.finish(
+                        collector_exit_codes=(result or {}).get('profile_processes',{}).get('perf_exit_codes'))
                     if not profile_result['complete']:
                         error=error or 'Requested profiling incomplete: '+str(profile_result.get('error') or 'artifact truncated')
                 except Exception as exc:

@@ -265,6 +265,9 @@ def operate(host,directory,expected,operation):
     marker=host.path(JOURNAL)
     with shared_lock(host,config):
         quiescent(host)
+        active=host.path(STATE)/'active.json'
+        if active.exists() or active.is_symlink():
+            raise ValueError('Profiling worker has active or unconfirmed cleanup state')
         before=retained(host)
         proposed_journal=dict(version=1,package_sha256=expected,retained=before)
         check_temporary(host,temporary(marker),canonical(proposed_journal),0o600)

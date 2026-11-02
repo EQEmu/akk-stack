@@ -375,7 +375,8 @@ class RecoveryRegression(unittest.TestCase):
         exported=runtime.request(self.server,self.value)
         self.assertEqual(exported['scope'],'profile-export-only')
         self.assertFalse(exported['executed'])
-        self.assertEqual(exported['workload_exit_code'],2)
+        self.assertIsNone(exported['workload_exit_code'])
+        self.assertEqual(exported['execution_exit_code'],2)
         self.assertIn(b'timeline.jsonl',self.client.recv(4096))
 
 
@@ -406,13 +407,44 @@ class ReviewR4ExportRegressions(unittest.TestCase):
         test_runtime.Runtime.setUp(self)
         run_id='e'*32;job=self.state/run_id;job.mkdir()
         sink=artifacts.Sink(job/'profiles');sink.accept(dict(name='timeline.jsonl',offset=0,data='YQ=='))
-        prior=dict(exit_code=1);runtime.retain_profiles(job,self.state,run_id,prior)
+        prior=dict(exit_code=2,cleanup_complete=False,guest=dict(exit_code=1,
+            normal_world=dict(exit_code=1,cleanup_complete=True,database_cleanup=True,
+                profiling=dict(mode='perf',complete=False,error='collector failed',collector_exit_codes=[1,0],analysis_exit_codes={'world-analysis':0})),
+            profile_transport=dict(complete=False,partial=True)))
+        runtime.retain_profiles(job,self.state,run_id,prior)
         runtime.atomic_json(self.state/'last-result.json',dict(version=1,run_id='f'*32,exit_code=0,scope='worker-smoke'))
         self.client.sendall(json.dumps(dict(version=1,operation='profile-artifacts',run_id=run_id)).encode()+b'\n')
         result=runtime.request(self.server,self.value)
         self.assertEqual(result['workload_exit_code'],1)
+        self.assertEqual(result['execution_exit_code'],2)
+        receipt=result['result_receipt']
+        self.assertTrue(receipt['native_cleanup_complete'])
+        self.assertTrue(receipt['database_cleanup_complete'])
+        self.assertFalse(receipt['vm_cleanup_complete'])
+        self.assertEqual(receipt['profiler']['collector_exit_codes'],[1,0])
+        self.assertFalse(receipt['transport']['complete'])
         self.assertEqual(result['profile_artifacts']['run_id'],run_id)
         self.assertIn(b'timeline.jsonl',self.client.recv(4096))
+
+
+class ReviewR5CollectorRegression(unittest.TestCase):
+    def test_failed_collector_cannot_pass_with_readable_analyzed_data(self):
+        from unittest.mock import Mock
+        for codes in ([1,0],[-9,0],None,[],[None,0],[True,0]):
+            with self.subTest(codes=codes), tempfile.TemporaryDirectory() as tmp:
+                directory=Path(tmp)
+                (directory/'summary.json').write_text(json.dumps(dict(sampler_complete=True,processes=[{}],truncated=[])))
+                for name in ('world','zone'): (directory/(name+'.perf.data')).write_bytes(b'readable partial trace')
+                session=object.__new__(profiling.Session)
+                session.directory=directory;session.mode='perf';session.tools={};session.preflight={}
+                session.config={'binaries':{'world':{},'zone':{}}}
+                session.sampler=Mock(returncode=0);session.exporter=Mock(returncode=0);session.stage=Mock()
+                with patch.object(profiling,'tool',return_value=0) as analyze:
+                    result=session.finish(collector_exit_codes=codes)
+                self.assertFalse(result['complete'])
+                self.assertIn('collector',result['error'])
+                self.assertEqual(analyze.call_count,2)
+                self.assertTrue((directory/'world.perf.data').exists())
 
 
 if __name__=='__main__': unittest.main()

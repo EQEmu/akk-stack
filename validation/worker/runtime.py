@@ -695,6 +695,19 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
     return report
 
 
+def profile_receipt(report):
+    """Keep independent verdicts without retaining native logs, argv or environment."""
+    guest=report.get('guest',{})
+    normal=guest.get('normal_world',{})
+    profile=normal.get('profiling',{})
+    return dict(overall_exit_code=report.get('exit_code',2),
+        guest_exit_code=guest.get('exit_code'),workload_exit_code=normal.get('exit_code'),
+        native_cleanup_complete=normal.get('cleanup_complete'),database_cleanup_complete=normal.get('database_cleanup'),
+        vm_cleanup_complete=report.get('cleanup_complete'),
+        profiler={key:profile[key] for key in ('mode','complete','error','collector_exit_codes','analysis_exit_codes','preflight') if key in profile},
+        transport={key:guest.get('profile_transport',{})[key] for key in ('complete','partial','export_error') if key in guest.get('profile_transport',{})})
+
+
 def retain_profiles(job,state,run_id,report):
     """Retain one bounded private collection independently of disposable VM cleanup."""
     from profile_artifacts import inventory
@@ -702,9 +715,11 @@ def retain_profiles(job,state,run_id,report):
     metadata=dict(version=1,run_id=run_id,files=inventory(job/'profiles'),
         partial=report.get('guest',{}).get('profile_transport',{}).get('complete') is not True,
         execution_exit_code=report.get('exit_code',2),
+        result_receipt=profile_receipt(report),
         retention='one collection, replaced by next profiling run; operator may delete sooner')
     # Rename the bytes and their identity together. Cleanup receipts may be replaced
     # later by ExecStopPost without making the collection unidentifiable.
+    if len(json.dumps(metadata).encode())>16384: raise ValueError('Retained profile receipt oversized')
     atomic_json(job/'profiles/collection.json',metadata)
     if current.exists():
         inventory(current)
@@ -720,12 +735,15 @@ def retained_profile(state,run_id):
     directory=state/'last-profile'
     files=inventory(directory)
     metadata=read_json(directory/'collection.json')
-    if not isinstance(metadata,dict) or set(metadata)!={'version','run_id','files','partial','execution_exit_code','retention'} or metadata.get('version')!=1:
+    if not isinstance(metadata,dict) or set(metadata)!={'version','run_id','files','partial','execution_exit_code','result_receipt','retention'} or metadata.get('version')!=1:
         raise ValueError('Malformed retained profile identity')
     if metadata['run_id']!=run_id: return None
     if metadata['files']!=files: raise ValueError('Retained profile changed')
     if type(metadata['execution_exit_code']) is not int or metadata['execution_exit_code'] not in (0,1,2):
         raise ValueError('Malformed retained profile verdict')
+    receipt=metadata['result_receipt']
+    if not isinstance(receipt,dict) or set(receipt)!=set(profile_receipt({})) or receipt['overall_exit_code']!=metadata['execution_exit_code']:
+        raise ValueError('Malformed retained profile result receipt')
     return metadata
 
 
@@ -777,7 +795,8 @@ def request(connection, value):
             connection.settimeout(30)
             with connection.makefile('wb') as stream: send(directory,stream)
             return dict(version=1,operation='profile-artifacts',scope='profile-export-only',exit_code=0,executed=False,
-                run_id=data['run_id'],workload_exit_code=metadata['execution_exit_code'],profile_artifacts=metadata)
+                run_id=data['run_id'],workload_exit_code=metadata['result_receipt']['workload_exit_code'],
+                execution_exit_code=metadata['execution_exit_code'],result_receipt=metadata['result_receipt'],profile_artifacts=metadata)
         finally: os.close(lock)
     if data.get('operation') == 'build':
         if (set(data) != {'version', 'operation', 'candidate', 'tree', 'bytes', 'sha256'} | ({'profiling'} if 'profiling' in data else set())

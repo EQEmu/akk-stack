@@ -135,6 +135,20 @@ class Publication(unittest.TestCase):
         lock.chmod(0o600)
         self.assertFalse(self.host.path(release.JOURNAL).exists())
 
+    def test_profiling_active_marker_refuses_all_operations_before_side_effects(self):
+        self.operation('apply')
+        marker=self.host.path(release.STATE)/'active.json'
+        for symlink in (False,True):
+            if symlink: marker.symlink_to('/missing/uncertain-state')
+            else: marker.write_text('{}')
+            for operation in ('apply','verify','activate','rollback'):
+                self.host.calls.clear()
+                with self.assertRaisesRegex(ValueError,'unconfirmed'): self.operation(operation)
+                self.assertFalse(any(call[1] in ('stop','start','-R','-r') for call in self.host.calls))
+                self.assertTrue(self.host.path(release.CONFIG).exists())
+            marker.unlink()
+        self.operation('rollback')
+
     def test_malformed_new_selection_and_new_manifest_mutation_or_omission_refuse(self):
         _,files,value=release.load_package(self.package,self.receipt['package_sha256'])
         for key,bad in (('shared_lock','/tmp/alternate'),('confinement','eqemu-validator-extra'),

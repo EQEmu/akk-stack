@@ -124,6 +124,7 @@ class SanitizerEvidence(unittest.TestCase):
             completed=suite();completed.update(selected=10,started=10,completed=10,failed=10,passed=False,
                 tests=[dict(name=str(i)+'n'*63,passed=False,diagnostic='d'*256) for i in range(10)])
             normal.validate_inserver(completed)
+            self.assertGreater(len(normal.encoded(completed)),3500)
             report['guest']['normal_world'].update(metadata,failure_evidence=evidence,inserver_tests=completed,
                 error='e'*498,control=None,ready_seconds=1,baseline_seconds=5,responsive_samples=50,cpu_ticks=[1,1],
                 clock_ticks_per_second=100,fixture_manifest_sha256='a'*64,database_cleanup=True,
@@ -141,6 +142,27 @@ class SanitizerEvidence(unittest.TestCase):
             for key in metadata:self.assertEqual(actual_normal[key],metadata[key])
             self.assertEqual(actual_normal['failure_evidence']['first_sanitizer_diagnostic'],evidence['first_sanitizer_diagnostic'])
             self.assertTrue(actual_normal['cleanup_complete']);self.assertEqual(actual['exit_code'],1)
+            # Exhaust every optional string. Mandatory supported fields still fit
+            # both boundaries, and the reducer has a finite stopping condition.
+            mandatory=json.loads(json.dumps(evidence));steps=0
+            while normal.shrink_failure_evidence(mandatory):
+                steps+=1;self.assertLess(steps,128)
+            self.assertFalse(normal.shrink_failure_evidence(mandatory))
+            self.assertLessEqual(len(normal.encoded(mandatory)),9824)
+            report['guest']['normal_world']['failure_evidence']=mandatory
+            compact=normal.export_evidence(report,'a'*40,root/'mandatory')
+            compact_normal=json.loads(compact.read_text())['normal_world']
+            self.assertLessEqual(compact.stat().st_size,16384)
+            self.assertEqual(compact_normal['inserver_tests'],completed)
+            for key in metadata:self.assertEqual(compact_normal[key],metadata[key])
+            # Unknown oversized mandatory data is malformed, not a supported
+            # production maximum. No authoritative bytes are silently removed.
+            report['guest']['normal_world']['malformed_oversize']='x'*20000
+            before=json.loads(json.dumps(report))
+            with self.assertRaisesRegex(normal.EvidenceBudgetError,'^irreducible-artifact-budget$'):
+                normal.export_evidence(report,'a'*40,root/'malformed')
+            self.assertEqual(report,before)
+            self.assertFalse((root/'malformed').exists())
 
     def test_first_sanitizer_context_and_final_stack_survive_long_middle(self):
         header = b'/source/task.cpp:12:9: runtime error: trusted fixture diagnostic\n'

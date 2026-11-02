@@ -959,6 +959,10 @@ def observe(binary_dir, server, control):
 
 
 
+class EvidenceBudgetError(ValueError):
+    """Irreducible artifact data cannot fit; the worker verdict remains intact."""
+
+
 def export_evidence(report, head, directory):
     """Retain one private exact-candidate diagnostic using AFK's existing file contract."""
     if type(report.get('exit_code')) is not int or report['exit_code'] not in (0, 1, 2):
@@ -991,7 +995,7 @@ def export_evidence(report, head, directory):
     while len(encoded(artifact)) + 1 > EVIDENCE_LIMIT:
         artifact['truncated'] = True
         if not shrink_failure_evidence(detail):
-            raise ValueError('Structured native evidence exceeds artifact budget')
+            raise EvidenceBudgetError('irreducible-artifact-budget')
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Hold the owned directory inode while writing fixed filenames. No final links,

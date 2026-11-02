@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'validation/worker'
 from client import CONFIG, exchange
 from prepare import prepare
 from identity import identity
-from normal_world import export_evidence
+from normal_world import EvidenceBudgetError, export_evidence
 
 
 def main():
@@ -65,14 +65,17 @@ def main():
                     artifact = export_evidence(report, request['candidate'], directory)
                     if artifact:
                         report['diagnostic_artifact'] = str(artifact)
-                except Exception as error:
-                    report.update(exit_code=2, diagnostic_export_error=str(error)[:500])
+                except EvidenceBudgetError:
+                    report['diagnostic_export_error'] = 'irreducible-artifact-budget'
+                except Exception:
+                    report['diagnostic_export_error'] = 'artifact-export-failed'
     except KeyboardInterrupt:
         report = {'version': 1, 'exit_code': 2, 'error': 'Client interrupted; owned worker cancellation requested by socket close'}
     except Exception as error:
         report = {'version': 1, 'exit_code': 2, 'error': str(error)[-4000:]}
     print(json.dumps(report, separators=(',', ':')))
-    return report['exit_code']
+    # Export is a separate host outcome; never relabel the worker/native cause.
+    return 2 if report.get('diagnostic_export_error') else report['exit_code']
 
 
 if __name__ == '__main__':

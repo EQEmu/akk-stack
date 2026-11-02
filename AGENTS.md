@@ -80,6 +80,8 @@ Guest-global OOM counters and bounded guest-root kernel facts remain advisory;
 unavailable or absent evidence does not establish no OOM or a passing run. The
 new fields together fit 2048 encoded bytes within the existing total budgets.
 Preparation does not activate v3 or authorize a qualification run.
+An artifact export failure adds a fixed `diagnostic_export_error` and returns
+process 2 separately; the worker report verdict, exits and cleanup stay intact.
 
 Prepare admission data from a clean committed Stack checkout using
 `scripts/prepare-sanitizer-worker --output /private/fresh-package`. It starts no

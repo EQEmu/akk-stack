@@ -440,12 +440,12 @@ def observe(binary_dir, server, control, profile_config=None):
                 observation['condition'] = 'deadline'
                 error = InserverFailure if ready and control != 'cancel' else RuntimeError
                 raise error('Normal-world deadline or missing in-server completion')
-            if any(p.poll() is not None for p in profilers):
-                raise RuntimeError('Requested perf collector exited early')
             if any(p.poll() is not None for p in processes):
                 observation['condition'] = 'child-exit'
                 error = InserverFailure if ready else RuntimeError
                 raise error('Normal server exited before assertion completed')
+            if any(p.poll() is not None for p in profilers):
+                raise RuntimeError('Requested perf collector exited early')
             if any(path.stat().st_size > 1024**2 for path in logs):
                 observation['condition'] = 'console-budget'
                 raise RuntimeError('Normal server console budget')

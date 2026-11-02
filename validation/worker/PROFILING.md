@@ -180,18 +180,22 @@ package directory; execute its protected copy.
 The following are separate proposed root steps, not authorization to run them:
 
 ```sh
+(
+set -eu
 sudo sha256sum --check - <<'REVIEWED_PINS'
 REVIEWED_OPERATOR_SHA256  /root/reviewed-profile-release/operator.py
 REVIEWED_PACKAGE_SHA256  /root/reviewed-profile-release/package.json
 REVIEWED_PINS
 sudo python3 -I /root/reviewed-profile-release/operator.py apply --package /root/reviewed-profile-release --package-sha256 REVIEWED_SHA256
-sudo python3 -I /root/reviewed-profile-release/operator.py verify --package /root/reviewed-profile-release --package-sha256 REVIEWED_SHA256
-sudo python3 -I /root/reviewed-profile-release/operator.py activate --package /root/reviewed-profile-release --package-sha256 REVIEWED_SHA256
-sudo python3 -I /root/reviewed-profile-release/operator.py rollback --package /root/reviewed-profile-release --package-sha256 REVIEWED_SHA256
+)
 ```
 
 Replace both checksum placeholders with the reviewed literal hashes before
-running the command. The final handoff includes exact paths and literal pins.
+running the command. The subshell must stop on failed verification before Python
+runs. Repeat the complete verification block for each separately chosen `verify`,
+`activate` or `rollback` operation, replacing only `apply`. Do not chain activation
+or rollback after publication. The final handoff includes exact paths and literal
+pins for each operation.
 
 Apply publishes only `/srv/eqemu-validator-profiling/FULL_COMMIT`,
 `/etc/eqemu-validator/profiling.json`, private state, unit/socket and profile.

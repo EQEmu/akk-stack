@@ -710,6 +710,43 @@ print(json.dumps(dict(error=error,clean=clean,collector=collector.returncode)))
             process.wait(timeout=3)
 
 
+class ReviewR12SimultaneousExitRegression(unittest.TestCase):
+    def test_native_failure_precedes_collector_exit_after_readiness(self):
+        import itertools
+        import normal_world as normal
+        from unittest.mock import Mock
+        for mode,native_died,collector_exit in ((None,True,0),('perf',True,0),('perf',True,1),('perf',False,1)):
+            with self.subTest(mode=mode,native_died=native_died,collector_exit=collector_exit), tempfile.TemporaryDirectory() as tmp:
+                server=Path(tmp);after_readiness=False
+                natives=[Mock(pid=101),Mock(pid=102)]
+                collectors=[Mock(pid=201,returncode=collector_exit),Mock(pid=202,returncode=collector_exit)]
+                for child in natives:
+                    child.poll.side_effect=lambda: 1 if after_readiness and native_died else None
+                for child in collectors:
+                    child.poll.side_effect=lambda: collector_exit if after_readiness else None
+                launched=[]
+                def launch(args,**kwargs):
+                    child=collectors[len([p for p in launched if p in collectors])] if args[0]=='/usr/bin/perf' else natives[len([p for p in launched if p in natives])]
+                    launched.append(child);return child
+                def ready(**kwargs):
+                    nonlocal after_readiness
+                    after_readiness=True;return True
+                config=server/'profile.json';config.write_text(json.dumps(dict(mode='perf',directory=str(server))))
+                output=io.StringIO()
+                with patch.object(normal.os,'geteuid',return_value=65534),patch.object(normal.resource,'setrlimit'), \
+                        patch.object(normal.Path,'is_file',return_value=True),patch.object(normal.subprocess,'Popen',side_effect=launch), \
+                        patch.object(normal,'world_connected',return_value=True),patch.object(normal,'probe',side_effect=ready), \
+                        patch.object(normal,'cpu_ticks',return_value=0),patch.object(normal,'failure_snapshot',return_value={}), \
+                        patch.object(normal,'finalize_collectors',return_value=None),patch.object(normal,'stop',return_value=True) as stop, \
+                        patch.object(normal.time,'monotonic',side_effect=itertools.count(0,.1)),contextlib.redirect_stdout(output):
+                    normal.observe(Path('/never-execute-candidate'),server,None,config if mode else None)
+                result=json.loads(next(line.removeprefix('NORMAL_WORLD_RESULT ') for line in output.getvalue().splitlines() if line.startswith('NORMAL_WORLD_RESULT ')))
+                self.assertEqual(result['exit_code'],1 if native_died else 2)
+                self.assertTrue(result['cleanup_complete']);stop.assert_called_once()
+                self.assertIn('Normal server exited' if native_died else 'perf collector exited',result['error'])
+                if mode:self.assertEqual(result['profile_processes']['perf_exit_codes'],[collector_exit]*2)
+
+
 class ReviewR5CollectorRegression(unittest.TestCase):
     def test_failed_collector_cannot_pass_with_readable_analyzed_data(self):
         from unittest.mock import Mock

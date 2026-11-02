@@ -181,6 +181,25 @@ class Publication(unittest.TestCase):
             path.write_bytes(original)
         self.assertEqual(verify(),0)
 
+    def test_documented_bootstrap_stops_before_operator_on_checksum_failure(self):
+        marker=self.root/'operator-invoked'
+        operator=self.package/'operator.py'
+        harmless=('from pathlib import Path\nPath('+repr(str(marker))+').touch()\n').encode()
+        operator.write_bytes(harmless)
+        doc=(ROOT/'validation/worker/PROFILING.md').read_text()
+        block=doc.split("(\nset -eu\nsudo sha256sum",1)[1].split('```',1)[0]
+        command=('(\nset -eu\nsudo sha256sum'+block).replace('sudo ','')
+        command=command.replace('/root/reviewed-profile-release',str(self.package))
+        command=command.replace('REVIEWED_OPERATOR_SHA256',release.sha(harmless))
+        command=command.replace('REVIEWED_PACKAGE_SHA256',self.receipt['package_sha256'])
+        command=command.replace('REVIEWED_SHA256',self.receipt['package_sha256'])
+        def invoke(): return subprocess.run(['/bin/sh','-c',command],capture_output=True).returncode
+        self.assertEqual(invoke(),0);self.assertTrue(marker.exists());marker.unlink()
+        for name in ('operator.py','package.json'):
+            path=self.package/name;original=path.read_bytes();path.write_bytes(original+b'changed')
+            self.assertNotEqual(invoke(),0);self.assertFalse(marker.exists())
+            path.write_bytes(original)
+
     def test_partial_publication_can_finish_or_roll_back_repeatedly(self):
         self.host.fail_after=5
         with self.assertRaisesRegex(RuntimeError,'interruption'): self.operation('apply')

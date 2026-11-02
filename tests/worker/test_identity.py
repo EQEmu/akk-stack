@@ -43,7 +43,7 @@ class Identity(unittest.TestCase):
             configurations = [({}, 'eqemu-validator'),
                 ({'diagnostic_profile': 'asan-ubsan-native-v1'}, 'eqemu-validator-asan-v1'),
                 *[({'diagnostic_profile': 'asan-ubsan-native-v1', 'diagnostic_policy': name}, name)
-                    for name in ('eqemu-validator-asan-v1', 'eqemu-validator-asan-v2')]]
+                    for name in ('eqemu-validator-asan-v1', 'eqemu-validator-asan-v2', 'eqemu-validator-asan-v3')]]
             for fields, policy in configurations:
                 config.write_text(json.dumps(dict(baseline, **fields)))
                 seen = []
@@ -55,7 +55,7 @@ class Identity(unittest.TestCase):
                     Path('/etc/systemd/system') / (policy + '.socket'), Path('/etc/apparmor.d') / policy})
                 self.assertEqual(any(path.name == 'sanitizers.py' for path in seen), bool(fields))
             for fields in ({'diagnostic_policy': 'eqemu-validator-asan-v2'},
-                    {'diagnostic_profile': 'asan-ubsan-native-v1', 'diagnostic_policy': 'eqemu-validator-asan-v3'},
+                    {'diagnostic_profile': 'asan-ubsan-native-v1', 'diagnostic_policy': 'eqemu-validator-asan-v4'},
                     {'diagnostic_profile': 'other'}):
                 config.write_text(json.dumps(dict(baseline, **fields)))
                 with self.assertRaises(ValueError), patch.object(identity, 'record') as record:

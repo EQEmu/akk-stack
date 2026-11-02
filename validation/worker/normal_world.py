@@ -324,8 +324,266 @@ def first_sanitizer_diagnostic(data):
                 truncated=start > 0 or len(text) < len(data[start:].decode(errors='replace')))
 
 
-def failure_snapshot(processes, logs, run_id, start, observation, secrets=()):
-    """Snapshot before TERM/KILL; later shutdown chatter cannot replace this evidence."""
+# Failure telemetry contains only bounded numbers and fixed enums. It is never
+# suite evidence, and the first poll observation is kept separate from final exits.
+CAPTURE_STATES = ('ok', 'unavailable', 'exited', 'identity-changed', 'invalid', 'budget',
+                  'denied', 'not-opened', 'read-error', 'overrun', 'would-block')
+CAPTURE_CONDITIONS = ('starting', 'responsive', 'child-exit', 'cancelled', 'deadline',
+    'console-budget', 'world-connection-lost', 'udp-rejected', 'udp-timeout', 'udp-refused',
+    'udp-malformed-reply', 'udp-allocation-exhausted', 'assertion')
+MEM_FIELDS = dict(MemTotal='total_kib', MemAvailable='available_kib',
+                  SwapTotal='swap_kib', SwapFree='swap_free_kib')
+
+
+def unsigned(value):
+    if not re.fullmatch(r'[0-9]{1,20}', value) or int(value) > 2**64-1:
+        raise ValueError('Invalid numeric observation')
+    return int(value)
+
+
+def proc_bytes(path, limit):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(fd, 'rb') as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode): raise ValueError('Invalid proc file')
+        data = stream.read(limit+1)
+        if len(data) > limit: raise ValueError('Proc input budget')
+        return data.decode('ascii')
+
+
+def capture_state(error):
+    if isinstance(error, PermissionError): return 'denied'
+    if isinstance(error, FileNotFoundError): return 'exited'
+    return 'invalid' if isinstance(error, (ValueError, UnicodeError, IndexError)) else 'read-error'
+
+
+def start_ticks(proc, pid):
+    # stat's comm may contain spaces and parentheses. Never export that text.
+    return unsigned(proc_bytes(proc / str(pid) / 'stat', 8192).rsplit(')', 1)[1].split()[19])
+
+
+def guest_memory(proc):
+    value = dict(state='ok', **{key: None for key in (*MEM_FIELDS.values(), 'oom_kill')})
+    try:
+        for line in proc_bytes(proc/'meminfo', 8192).splitlines():
+            fields = line.split()
+            if fields and fields[0].rstrip(':') in MEM_FIELDS:
+                if len(fields) != 3 or fields[2] != 'kB': raise ValueError('Memory units')
+                value[MEM_FIELDS[fields[0].rstrip(':')]] = unsigned(fields[1])
+        for line in proc_bytes(proc/'vmstat', 65536).splitlines():
+            fields = line.split()
+            if fields and fields[0] == 'oom_kill':
+                if len(fields) != 2: raise ValueError('Counter fields')
+                value['oom_kill'] = unsigned(fields[1])
+        if any(item is None for key, item in value.items() if key != 'state'):
+            value['state'] = 'unavailable'
+    except (OSError, ValueError, UnicodeError) as error:
+        value['state'] = capture_state(error)
+    return value
+
+
+class FailureCapture:
+    """Sample at existing guard opportunities; latch before any cleanup signal."""
+    def __init__(self, start, proc=Path('/proc')):
+        self.start, self.proc = start, proc
+        self.children = []
+        self.pre = None
+        self.baseline = guest_memory(proc)
+        self.failure = None
+        self.last_sample = None
+
+    def elapsed(self): return max(0, min(2**32-1, int((time.monotonic()-self.start)*1000)))
+
+    def watch(self, name, process):
+        item = dict(name=name, pid=process.pid, start_ticks=None, samples=0, last_ms=None,
+                    max_gap_ms=0, rss_kib=None, hwm_kib=None, state='unavailable')
+        try: item['start_ticks'] = start_ticks(self.proc, process.pid)
+        except (OSError, ValueError, UnicodeError, IndexError) as error: item['state'] = capture_state(error)
+        self.children.append(item)
+
+    def sample(self, force=False):
+        now = self.elapsed()
+        if not force and self.last_sample is not None and now-self.last_sample < 100: return
+        gap = now - (self.last_sample if self.last_sample is not None else 0)
+        self.last_sample = now
+        for item in self.children:
+            item['max_gap_ms'] = max(item['max_gap_ms'], gap)
+            try:
+                before = start_ticks(self.proc, item['pid'])
+                if item['start_ticks'] is None or before != item['start_ticks']:
+                    item['state'] = 'identity-changed'; continue
+                fields = {}
+                for line in proc_bytes(self.proc/str(item['pid'])/'status', 8192).splitlines():
+                    parts = line.split()
+                    if parts and parts[0] in ('VmRSS:', 'VmHWM:'):
+                        if len(parts) != 3 or parts[2] != 'kB': raise ValueError('Process units')
+                        fields[parts[0]] = unsigned(parts[1])
+                if start_ticks(self.proc, item['pid']) != before:
+                    item['state'] = 'identity-changed'; continue
+                if set(fields) != {'VmRSS:', 'VmHWM:'}: raise ValueError('Missing process memory')
+                item.update(samples=min(2**32-1, item['samples']+1), last_ms=now,
+                    max_gap_ms=max(item['max_gap_ms'], gap), state='ok',
+                    rss_kib=max(item['rss_kib'] or 0, fields['VmRSS:']),
+                    hwm_kib=max(item['hwm_kib'] or 0, fields['VmHWM:']))
+            except (OSError, ValueError, UnicodeError, IndexError) as error: item['state'] = capture_state(error)
+
+    def latch(self, processes, condition, polls=None):
+        if self.pre is not None: return
+        polls = [p.poll() for p in processes[:2]] if polls is None else polls
+        observed_ms = self.elapsed()
+        self.sample(force=True)
+        items = [dict(name=item['name'], pid=item['pid'], start_ticks=item['start_ticks'], returncode=code)
+                 for item, code in zip(self.children, polls)]
+        exited = [item['name'] for item in items if item['returncode'] is not None]
+        self.pre = dict(version=1, elapsed_ms=observed_ms,
+            condition=condition if condition in CAPTURE_CONDITIONS else 'assertion', processes=items,
+            first_observed_exited=next(iter(exited), None), simultaneous_observed=len(exited) > 1)
+        self.failure = guest_memory(self.proc)
+
+    def finish(self):
+        final = guest_memory(self.proc)
+        first, last = self.baseline['oom_kill'], final['oom_kill']
+        middle = (self.failure or final)['oom_kill']
+        counters = (first, middle, last)
+        reset = any(a is not None and b is not None and b < a for a, b in zip(counters, counters[1:]))
+        return fit_resources(dict(version=1, processes=self.children,
+            guest=dict(baseline=self.baseline, failure=self.failure or final, final=final,
+                       delta=None if first is None or last is None or reset else last-first,
+                       failure_delta=None if first is None or middle is None or reset else middle-first, reset=reset),
+            kernel=dict(state='not-opened', records=[], truncated=False, additional=0, unparsed=0), truncated=False),
+            min(1536, 2048-len(encoded(self.pre))-60))
+
+
+def fit_resources(value, budget=1536):
+    """Drop only optional numeric detail, explicitly, before any outer truncation."""
+    value = json.loads(json.dumps(value))
+    if len(encoded(value)) > budget:
+        value['truncated'] = True
+        kernel = value['kernel']
+        while kernel['records'] and len(encoded(value)) > budget:
+            kernel['records'].pop(); kernel['additional'] += 1; kernel['truncated'] = True
+        for record in value['guest'].values():
+            if isinstance(record, dict):
+                for key in MEM_FIELDS.values():
+                    if len(encoded(value)) <= budget: break
+                    record[key] = None; record['state'] = 'budget'
+        for record in value['processes']:
+            if len(encoded(value)) <= budget: break
+            record.update(rss_kib=None, hwm_kib=None, state='budget')
+    if len(encoded(value)) > budget: raise ValueError('Failure resource metadata budget')
+    return value
+
+
+class KernelOOM:
+    """Guest-root-only nonblocking kernel window; no raw kernel text escapes."""
+    def __init__(self):
+        self.fd = None
+        self.state = 'not-opened'
+        if os.geteuid() != 0 or not Path('/opt/eqemu-worker-build-guest').is_file(): return
+        try:
+            self.fd = os.open('/dev/kmsg', os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            os.lseek(self.fd, 0, os.SEEK_END)
+            self.state = 'ok'
+        except OSError as error:
+            self.state = capture_state(error)
+            self.close()
+
+    def close(self):
+        if self.fd is not None: os.close(self.fd); self.fd = None
+
+    def finish(self, pids):
+        result = dict(state=self.state, records=[], truncated=False, additional=0, unparsed=0)
+        try:
+            if self.fd is None: return result
+            end = time.monotonic()+.05
+            total = 0
+            for _ in range(256):
+                if time.monotonic() >= end or total >= 65536:
+                    result.update(state='budget', truncated=True); break
+                try: raw = os.read(self.fd, min(8192, 65536-total))
+                except BlockingIOError:
+                    result['state'] = 'would-block'; break
+                except OSError as error:
+                    result['state'] = 'overrun' if error.errno == 32 else capture_state(error)
+                    result['truncated'] = True; break
+                if not raw: break
+                total += len(raw)
+                # kmsg metadata and message grammar are checked independently.
+                meta, sep, message = raw.partition(b';')
+                fields = meta.split(b',')
+                candidate = b'Killed process ' in message
+                if not sep or len(fields) != 4:
+                    result['unparsed'] += int(candidate); continue
+                match = re.fullmatch(rb'(?:Out of memory: |Memory cgroup out of memory: )Killed process ([0-9]+) \([^\n]*\) total-vm:([0-9]+)kB, anon-rss:([0-9]+)kB, file-rss:([0-9]+)kB, shmem-rss:([0-9]+)kB[^\n]*(?:\n)?', message)
+                if match is None:
+                    result['unparsed'] += int(candidate); continue
+                try:
+                    if unsigned(fields[0].decode('ascii')) > 191 or fields[3] not in (b'-', b'c'):
+                        result['unparsed'] += 1; continue
+                    seq, usec = unsigned(fields[1].decode('ascii')), unsigned(fields[2].decode('ascii'))
+                    numbers = [unsigned(x.decode('ascii')) for x in match.groups()]
+                except (ValueError, UnicodeError):
+                    result['unparsed'] += 1; continue
+                if numbers[0] not in pids: continue
+                if len(result['records']) == 2:
+                    result['additional'] += 1; result['truncated'] = True; continue
+                result['records'].append(dict(pid=numbers[0], sequence=seq, time_us=usec,
+                    total_vm_kib=numbers[1], anon_rss_kib=numbers[2], file_rss_kib=numbers[3], shmem_rss_kib=numbers[4]))
+            else: result.update(state='budget', truncated=True)
+            return result
+        finally: self.close()
+
+
+def validate_capture(value):
+    """Reject raw strings, unknown keys and bool-as-int in advisory telemetry."""
+    def number(n, signed=False):
+        if n is not None and (type(n) is not int or not (-2**31 if signed else 0) <= n <= 2**64-1):
+            raise ValueError('Invalid failure capture number')
+    def record(item, numbers, extras=()):
+        if not isinstance(item, dict) or set(item) != set(numbers) | set(extras):
+            raise ValueError('Invalid failure capture fields')
+        for key in numbers: number(item[key], signed=key == 'returncode')
+    def processes(items, pre=False):
+        if not isinstance(items, list) or len(items) > 2: raise ValueError('Invalid failure capture processes')
+        for name, item in zip(('world', 'zone'), items):
+            numbers = ('pid', 'start_ticks', 'returncode') if pre else ('pid','start_ticks','samples','last_ms','max_gap_ms','rss_kib','hwm_kib')
+            record(item, numbers, ('name',) if pre else ('name','state'))
+            if item['name'] != name or item['pid'] is None: raise ValueError('Invalid failure capture process identity')
+            if not pre and item['state'] not in CAPTURE_STATES: raise ValueError('Invalid failure capture state')
+    pre = value.get('pre_cleanup_observation')
+    resources = value.get('failure_resources')
+    if pre is not None:
+        record(pre, ('version','elapsed_ms'), ('condition','processes','first_observed_exited','simultaneous_observed'))
+        processes(pre['processes'], pre=True)
+        exited = [p['name'] for p in pre['processes'] if p['returncode'] is not None]
+        if (pre['version'] != 1 or pre['condition'] not in CAPTURE_CONDITIONS
+                or pre['first_observed_exited'] != next(iter(exited), None)
+                or type(pre['simultaneous_observed']) is not bool or pre['simultaneous_observed'] != (len(exited)>1)
+                or len(encoded(pre)) > 512): raise ValueError('Invalid first failure observation')
+    if resources is not None:
+        record(resources, ('version',), ('processes','guest','kernel','truncated'))
+        processes(resources['processes'])
+        guest = resources['guest']; record(guest, ('delta','failure_delta'), ('baseline','failure','final','reset'))
+        for key in ('baseline','failure','final'):
+            record(guest[key], (*MEM_FIELDS.values(),'oom_kill'), ('state',))
+            if guest[key]['state'] not in CAPTURE_STATES: raise ValueError('Invalid guest memory state')
+        kernel = resources['kernel']; record(kernel, ('additional','unparsed'), ('state','records','truncated'))
+        if kernel['state'] not in CAPTURE_STATES or not isinstance(kernel['records'], list) or len(kernel['records'])>2:
+            raise ValueError('Invalid kernel facts')
+        for item in kernel['records']:
+            record(item, ('pid','sequence','time_us','total_vm_kib','anon_rss_kib','file_rss_kib','shmem_rss_kib'))
+            if item['pid'] not in [p['pid'] for p in resources['processes']]: raise ValueError('Unmatched kernel target')
+        if (resources['version'] != 1 or any(type(x) is not bool for x in
+                (resources['truncated'], guest['reset'], kernel['truncated'])) or len(encoded(resources))>1536):
+            raise ValueError('Invalid resource facts')
+        if pre is not None and ([(p['name'],p['pid'],p['start_ticks']) for p in pre['processes']]
+                != [(p['name'],p['pid'],p['start_ticks']) for p in resources['processes']]):
+            raise ValueError('Failure capture identity differs')
+    fields = {key:value[key] for key in ('pre_cleanup_observation','failure_resources') if key in value}
+    if len(encoded(fields))>2048: raise ValueError('Combined failure capture budget')
+
+
+def failure_snapshot(processes, logs, run_id, start, observation, secrets=(), reserved=0):
+    """Bound console evidence independently from the latched pre-cleanup poll."""
     evidence = dict(version=1, run_id=run_id, elapsed_ms=max(0, int((time.monotonic()-start)*1000)),
                     observation=dict(observation), processes=[], console={}, console_truncated={},
                     progress=dict(active_case=None, last_completed_case=None, rejected_events=0),
@@ -364,7 +622,7 @@ def failure_snapshot(processes, logs, run_id, start, observation, secrets=()):
             evidence['console'][path.name] = bounded_text('unavailable: ' + str(error), 256)
     # Bound JSON-encoded bytes, including escaping of hostile console text.
     evidence['truncated'] = False
-    while len(encoded(evidence)) > 12000:
+    while len(encoded(evidence)) > 12000-reserved:
         evidence['truncated'] = True
         name = max(evidence['console'], key=lambda name: len(evidence['console'][name]), default=None)
         if name is None or not evidence['console'][name]:
@@ -493,6 +751,7 @@ def observe(binary_dir, server, control):
     result = dict(exit_code=2, cleanup_complete=False, control=control)
     start = time.monotonic()
     secrets = ()
+    capture = FailureCapture(start) if os.environ.get('ASAN_OPTIONS') else None
     try:
         if os.environ.get('ASAN_OPTIONS'):
             secrets = read_observer_secrets()
@@ -504,10 +763,13 @@ def observe(binary_dir, server, control):
                 observation['condition'] = 'deadline'
                 error = InserverFailure if ready and control != 'cancel' else RuntimeError
                 raise error('Normal-world deadline or missing in-server completion')
-            if any(p.poll() is not None for p in processes):
+            polls = [p.poll() for p in processes] if capture else None
+            if (any(code is not None for code in polls) if capture else any(p.poll() is not None for p in processes)):
                 observation['condition'] = 'child-exit'
+                if capture: capture.latch(processes, 'child-exit', polls)
                 error = InserverFailure if ready else RuntimeError
                 raise error('Normal server exited before assertion completed')
+            if capture: capture.sample()
             if any(path.stat().st_size > 1024**2 for path in logs):
                 observation['condition'] = 'console-budget'
                 raise RuntimeError('Normal server console budget')
@@ -538,6 +800,7 @@ def observe(binary_dir, server, control):
                         env['EQEMU_INSERVER_TEST_CONTROL'] = 'assertion'
                 processes.append(subprocess.Popen([str(binary_dir / name), *args], cwd=cwd, env=env,
                     stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT))
+                if capture: capture.watch(name, processes[-1])
         while True:
             guard()
             if responsive():
@@ -579,7 +842,8 @@ def observe(binary_dir, server, control):
     finally:
         try:
             try:
-                before_cleanup = failure_snapshot(processes, logs, run_id, start, observation, secrets)
+                if capture: capture.latch(processes, observation['condition'])
+                before_cleanup = failure_snapshot(processes, logs, run_id, start, observation, secrets, 2048 if capture else 0)
             except Exception as error:
                 before_cleanup = dict(version=1, run_id=run_id, capture_error=bounded_text(error, 256))
             cleanup = {}
@@ -592,7 +856,7 @@ def observe(binary_dir, server, control):
                         for name, process in zip(('world', 'zone'), processes[:2])]
                     if any(item['returncode'] != 0 for item in result['native_exit_codes']):
                         result.update(exit_code=1, error='Sanitized native process exited nonzero during execution/shutdown')
-                    before_cleanup = failure_snapshot(processes, logs, run_id, start, observation, secrets)
+                    before_cleanup = failure_snapshot(processes, logs, run_id, start, observation, secrets, 2048)
             except Exception as error:
                 result.update(exit_code=2, cleanup_complete=False, cleanup_error=bounded_json_text(error, 500))
                 cleanup['error'] = result['cleanup_error']
@@ -615,6 +879,9 @@ def observe(binary_dir, server, control):
             result['exit_code'] = 2
         if result['exit_code'] != 0:
             result['failure_evidence'] = before_cleanup
+            if capture:
+                result.update(pre_cleanup_observation=capture.pre, failure_resources=capture.finish())
+                validate_capture(result)
     print('NORMAL_WORLD_RESULT ' + json.dumps(result, separators=(',', ':')), flush=True)
 
 
@@ -630,6 +897,7 @@ def export_evidence(report, head, directory):
             or report.get('candidate') != head or not isinstance(report.get('run_id'), str)
             or not re.fullmatch('[a-f0-9]{32}', report['run_id'])):
         raise ValueError('Native artifact candidate/run identity mismatch')
+    validate_capture(normal)
     passed = report['exit_code'] == 0
     profile = report.get('diagnostic_profile')
     if profile:
@@ -704,6 +972,7 @@ def run(build, identity):
     clean = False
     result = None
     error = None
+    kernel = None
     binaries = {name: build.sha(build.WORK / 'build/bin' / name) for name in ('world', 'zone', 'shared_memory')}
     try:
         MEDIA.mkdir()
@@ -746,6 +1015,7 @@ def run(build, identity):
                     raise RuntimeError('Duplicate normal-world readiness phase')
                 ready = True
                 build.emit({'kind': 'stage', 'name': 'normal-world-ready', 'state': 'started'})
+        if credential_snapshot is not None: kernel = KernelOOM()
         with (observer_credential_pipe(credential_snapshot) if credential_snapshot is not None
               else nullcontext()) as credentials:
             output = runtime.command('normal-world', [*prefix, '/usr/bin/python3', '/opt/normal_world.py',
@@ -757,6 +1027,12 @@ def run(build, identity):
         if len(frames) != 1:
             raise RuntimeError('Missing/duplicate normal-world assertion completion')
         result = json.loads(runtime.scrub(json.dumps(frames[0], separators=(',', ':'))))
+        validate_capture(result)
+        if kernel and isinstance(result.get('failure_resources'), dict):
+            resources = result['failure_resources']
+            resources['kernel'] = kernel.finish([p['pid'] for p in resources['processes']])
+            result['failure_resources'] = fit_resources(resources, min(1536, 2048-len(encoded(result.get('pre_cleanup_observation')))-60))
+            validate_capture(result)
         if (not isinstance(result, dict) or type(result.get('exit_code')) is not int
                 or result['exit_code'] not in (0, 1, 2) or result.get('cleanup_complete') is not True):
             # Keep the observer's own cleanup evidence. Host VM destruction is a
@@ -786,6 +1062,7 @@ def run(build, identity):
     except Exception as exc:
         error = runtime.scrub(str(exc))[-3000:]
     finally:
+        if kernel is not None: kernel.close()
         try:
             clean = runtime.cleanup()
         except Exception as exc:

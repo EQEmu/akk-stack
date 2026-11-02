@@ -28,6 +28,9 @@ class Transfer(unittest.TestCase):
         import normal_world
         normal = dict(exit_code=1, cleanup_complete=True,
                       failure_evidence=dict(console={'zone': 'useful detail '+('x'*9000)}))
+        capture = normal_world.FailureCapture(time.monotonic(),proc=Path('/nonexistent-ks48-proc'))
+        capture.latch([], 'assertion')
+        normal.update(pre_cleanup_observation=capture.pre,failure_resources=capture.finish())
         failure = build_guest.CandidateFailure('assertion ' + '\ufffd'*3500)
         failure.result = normal
         old = {key: getattr(build_guest, key) for key in ('WORK', 'MEDIA', 'DEADLINE', 'CHECKS', 'STAGE')}
@@ -278,6 +281,8 @@ class BuildRuntime(unittest.TestCase):
         self.assertNotIn('guest', first['text'])
         self.assertTrue(first['advisory'])
         self.assertFalse(error.result['failure_evidence']['stack_capture']['captured'])
+        self.assertEqual(error.result['pre_cleanup_observation']['first_observed_exited'],'zone')
+        self.assertEqual(error.result['failure_resources']['kernel']['state'],'denied')
         detail = dict(version=1, nonce='a'*32, scope='worker-build', exit_code=1,
             stage='normal-world', error='udp-timeout', selected_checks=list(runtime.BUILD_CHECKS),
             completed_checks=list(runtime.BUILD_CHECKS[:-1]), normal_world=error.result)

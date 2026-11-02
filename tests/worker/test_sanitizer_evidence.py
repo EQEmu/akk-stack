@@ -7,7 +7,7 @@ import tempfile
 import time
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'validation/worker'))
 import normal_world as normal
@@ -24,6 +24,44 @@ class SanitizerEvidence(unittest.TestCase):
             with patch.dict(os.environ, {'ASAN_OPTIONS': 'detect_leaks=1'} if enabled else {}, clear=True):
                 return normal.failure_snapshot([], paths, 'a'*32, time.monotonic(),
                     dict(condition='child-exit', last_success_ms=None), secrets)
+
+    def test_failure_metadata_reservation_preserves_headers_and_whole_frame_budgets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            capture=normal.FailureCapture(time.monotonic(),proc=root/'missing')
+            children=[Mock(pid=123,poll=Mock(return_value=None)),Mock(pid=124,poll=Mock(return_value=-9))]
+            for name,child in zip(('world','zone'),children):capture.watch(name,child)
+            capture.latch(children,'child-exit',[None,-9])
+            resources=capture.finish()
+            for item in resources['processes']:
+                for key in ('start_ticks','samples','last_ms','max_gap_ms','rss_kib','hwm_kib'):item[key]=2**64-1
+            for key in ('baseline','failure','final'):
+                for field in (*normal.MEM_FIELDS.values(),'oom_kill'):resources['guest'][key][field]=2**64-1
+            resources['kernel'].update(state='ok',records=[dict(pid=123,**{key:2**64-1 for key in ('sequence','time_us','total_vm_kib','anon_rss_kib','file_rss_kib','shmem_rss_kib')})]*2)
+            resources=normal.fit_resources(resources, min(1536,2048-len(normal.encoded(capture.pre))-60))
+            # Pair identities still bind even if optional sampling counters are large.
+            for a,b in zip(capture.pre['processes'],resources['processes']):a['start_ticks']=b['start_ticks']
+            metadata=dict(pre_cleanup_observation=capture.pre,failure_resources=resources)
+            normal.validate_capture(metadata)
+            self.assertTrue(resources['truncated'])
+            self.assertLessEqual(len(normal.encoded(metadata)),2048)
+            paths=[root/name for name in ('world-console.log','zone-console.log')]
+            for path in paths:path.write_bytes(b'context\n/source.cpp:1: runtime error: first\n'+('\x00\ufffd\U0001f600'*18000).encode())
+            with patch.dict(os.environ,{'ASAN_OPTIONS':'detect_leaks=1'}):
+                evidence=normal.failure_snapshot([],paths,'a'*32,time.monotonic(),dict(condition='child-exit'),reserved=2048)
+            self.assertLessEqual(len(normal.encoded(evidence))+len(normal.encoded(metadata)),12000)
+            self.assertEqual(len(evidence['first_sanitizer_diagnostic']),2)
+            report=failure();report['diagnostic_profile']='asan-ubsan-native-v1'
+            report['guest']['normal_world'].update(metadata,failure_evidence=evidence)
+            report['guest']['sanitizers']=dict(profile='asan-ubsan-native-v1',environment=dict(ASAN_OPTIONS='detect_leaks=1'),
+                controls=[dict(mode=mode,returncode=1,output='x'*1800) for mode in ('pass','use-after-free','out-of-bounds','undefined','leak')],
+                binaries={name:dict(sha256='b'*64,runtimes=['libasan','libubsan']) for name in ('tests','world','zone','shared_memory')})
+            self.assertLessEqual(len(normal.encoded(report['guest'])),32768)
+            artifact=normal.export_evidence(report,'a'*40,root/'evidence')
+            actual=json.loads(artifact.read_text())['normal_world']
+            self.assertEqual(actual['pre_cleanup_observation'],metadata['pre_cleanup_observation'])
+            self.assertEqual(actual['failure_resources'],metadata['failure_resources'])
+            self.assertLessEqual(artifact.stat().st_size,16384)
 
     def test_first_sanitizer_context_and_final_stack_survive_long_middle(self):
         header = b'/source/task.cpp:12:9: runtime error: trusted fixture diagnostic\n'

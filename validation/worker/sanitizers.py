@@ -9,7 +9,7 @@ import shlex
 import time
 
 PROFILE = 'asan-ubsan-native-v1'
-POLICIES = ('eqemu-validator-asan-v1', 'eqemu-validator-asan-v2')
+POLICIES = ('eqemu-validator-asan-v1', 'eqemu-validator-asan-v2', 'eqemu-validator-asan-v3')
 ENV = dict(ASAN_OPTIONS='halt_on_error=1:abort_on_error=0:detect_leaks=1:symbolize=1:exitcode=1',
            UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1:exitcode=1',
            ASAN_SYMBOLIZER_PATH='/usr/bin/addr2line')

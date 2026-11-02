@@ -49,9 +49,10 @@ Run source regressions with
 trusted processes and real pipes/adapters, without candidate execution.
 
 `full-sanitizers` requires an explicit reviewed/admitted diagnostic configuration.
-The retained first release uses `/etc/eqemu-validator/asan-v1.json`; the prepared
-collector release uses `/etc/eqemu-validator/asan-v2.json` only after root admission.
-Both select
+Retained admitted releases use `/etc/eqemu-validator/asan-v1.json` and
+`/etc/eqemu-validator/asan-v2.json`. The prepared failure-capture release uses
+`/etc/eqemu-validator/asan-v3.json` only after separate reviewed external admission.
+All select
 `asan-ubsan-native-v1`, keep ordinary selection intact, and run the deliberate
 pass/UAF/OOB/UB/leak controls before the unchanged native utility and normal-world
 suites. Expected control failures qualify diagnostics; they are separate from
@@ -71,15 +72,24 @@ and preserves byte offsets; the outer scrubber remains in place. New fields cann
 or replace process exits, suite finalization or cleanup. Unexported guest console
 heads cannot be recovered after guest cleanup, including from worker serial.
 
+The prepared v3 release adds failure-only `pre_cleanup_observation` before any
+cleanup signal, separately from final child exits and late sanitizer reports. Its
+first observed child exit does not establish exit chronology or signal sender.
+Numeric memory samples use existing guard opportunities and can miss a final peak.
+Guest-global OOM counters and bounded guest-root kernel facts remain advisory;
+unavailable or absent evidence does not establish no OOM or a passing run. The
+new fields together fit 2048 encoded bytes within the existing total budgets.
+Preparation does not activate v3 or authorize a qualification run.
+
 Prepare admission data from a clean committed Stack checkout using
 `scripts/prepare-sanitizer-worker --output /private/fresh-package`. It starts no
 VM and prints exact apply/rollback argv plus manifest/operator hashes. A real
 root operator must review those finite assets, install the operator into the
 printed root-owned path, and externally verify that copy's exact SHA256 before
 running the printed `/usr/bin/python3 -I` command outside NoNewPrivs. Preparation
-targets additive `asan-v2` assets and records the retained `asan-v1` policy hashes.
-Apply checks original policy/runtime and retained-v1 hashes, quiescent connections
-and active records across all three selections, and holds the ordinary worker
+targets additive `asan-v3` assets and records retained ordinary/v1/v2 policy and
+helper hashes. Apply checks those hashes, quiescent connections and active records
+across all four selections, and holds the unchanged ordinary worker
 lock. It adds a separate root-owned versioned release, AppArmor profile and socket
 with the same physical resource caps. Diagnostic private state is separate; all sockets share the
 ordinary lock, preventing concurrent VMs. No service runs at boot unless an

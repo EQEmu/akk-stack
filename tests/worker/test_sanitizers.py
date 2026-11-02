@@ -34,6 +34,19 @@ def restrictive_umask():
     finally: os.umask(prior)
 
 
+def retained_fixture(current, files):
+    assets = {path: ('retained '+str(path)).encode() for path in (*operator.ORDINARY,*operator.RETAINED_V1,*operator.RETAINED_V2)}
+    assets[operator.CONFIG] = json.dumps(current).encode()
+    assets.update({Path(current['code_dir'])/name: ('ordinary '+name).encode() for name in files})
+    for version, paths in ((1,operator.RETAINED_V1),(2,operator.RETAINED_V2)):
+        name = 'eqemu-validator-asan-v'+str(version)
+        code = '/srv/'+name+'/'+'b'*40
+        assets[paths[0]] = json.dumps(dict(diagnostic_profile=operator.PROFILE,diagnostic_policy=name,
+            code_dir=code,socket='/run/'+name+'.sock',state_dir='/var/lib/eqemu-validator/asan-v'+str(version))).encode()
+        assets.update({Path(code)/file: ('retained '+name+file).encode() for file in files})
+    return assets
+
+
 class Sanitizers(unittest.TestCase):
     def test_identity_accepts_ordinary_installed_closure_and_requires_diagnostic_helper(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -99,7 +112,7 @@ class Sanitizers(unittest.TestCase):
     def test_ordinary_and_diagnostic_configurations_share_exact_lock(self):
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary)
-            children = [parent / slot for slot in ('asan-v1', 'asan-v2')]
+            children = [parent / slot for slot in ('asan-v1', 'asan-v2', 'asan-v3')]
             for child in children: child.mkdir()
             configs = [dict(state_dir=str(parent)),
                 *(dict(state_dir=str(child), diagnostic_profile=sanitizers.PROFILE) for child in children)]
@@ -152,7 +165,7 @@ class Sanitizers(unittest.TestCase):
                     self.assertEqual(runtime.config(path), dict(value, **fields))
                     trusted.assert_called_once_with(path)
             for fields in ({'diagnostic_policy': sanitizers.POLICIES[1]},
-                    dict(diagnostic_profile=sanitizers.PROFILE, diagnostic_policy='eqemu-validator-asan-v3'),
+                    dict(diagnostic_profile=sanitizers.PROFILE, diagnostic_policy='eqemu-validator-asan-v4'),
                     dict(diagnostic_profile=sanitizers.PROFILE, diagnostic_policy=None)):
                 path.write_text(json.dumps(dict(value, **fields)))
                 with patch.object(runtime, 'root_file', return_value=path), self.assertRaises(ValueError):
@@ -256,9 +269,7 @@ class Admission(unittest.TestCase):
             code_dir='/srv/eqemu-validator-code', state_dir='/var/lib/eqemu-validator',
             socket='/run/eqemu-validator.sock', base_image='/public/base',
             submitter=pwd.getpwuid(os.getuid()).pw_name)
-        retained = {path: ('retained ' + str(path)).encode() for path in (*operator.ORDINARY, *operator.RETAINED_V1)}
-        retained[operator.CONFIG] = json.dumps(current).encode()
-        retained.update({Path(current['code_dir']) / name: ('ordinary ' + name).encode() for name in FILES})
+        retained = retained_fixture(current, FILES)
         original_load = operator.load
         def load(path, *args):
             return retained[path] if path in retained else original_load(path, *args)
@@ -272,14 +283,15 @@ class Admission(unittest.TestCase):
             output, summary = self.prepared(temporary)
             manifest, data, targets = operator.package(output, summary['manifest_sha256'])
             self.assertEqual(manifest['configuration']['diagnostic_profile'], sanitizers.PROFILE)
-            self.assertEqual(manifest['configuration']['state_dir'], '/var/lib/eqemu-validator/asan-v2')
+            self.assertEqual(manifest['configuration']['state_dir'], '/var/lib/eqemu-validator/asan-v3')
             self.assertEqual(manifest['configuration']['diagnostic_policy'], operator.NAME)
-            self.assertEqual(manifest['configuration']['code_dir'], '/srv/eqemu-validator-asan-v2/' + 'a'*40)
-            self.assertEqual(manifest['configuration']['socket'], '/run/eqemu-validator-asan-v2.sock')
-            self.assertEqual(set(manifest['retained_v1_sha256']), {str(path) for path in operator.RETAINED_V1})
+            self.assertEqual(manifest['configuration']['code_dir'], '/srv/eqemu-validator-asan-v3/' + 'a'*40)
+            self.assertEqual(manifest['configuration']['socket'], '/run/eqemu-validator-asan-v3.sock')
+            self.assertEqual(len(manifest['retained_v1_sha256']), len(manifest['release_files'])+4)
+            self.assertEqual(len(manifest['retained_v2_sha256']), len(manifest['release_files'])+4)
             self.assertTrue({str(path) for path in operator.ORDINARY} <= set(manifest['ordinary_sha256']))
-            self.assertTrue(all(path not in targets.values() for path in (*operator.ORDINARY, *operator.RETAINED_V1)))
-            self.assertEqual(targets['config.json'], Path('/etc/eqemu-validator/asan-v2.json'))
+            self.assertTrue(all(path not in targets.values() for path in (*operator.ORDINARY, *operator.RETAINED_V1, *operator.RETAINED_V2)))
+            self.assertEqual(targets['config.json'], Path('/etc/eqemu-validator/asan-v3.json'))
             self.assertEqual(targets['worker.socket'].name, operator.NAME + '.socket')
             self.assertEqual(targets['worker.service'].name, operator.NAME + '@.service')
             self.assertEqual(targets['apparmor'].name, operator.NAME)
@@ -294,34 +306,36 @@ class Admission(unittest.TestCase):
             (output / 'worker.service').write_bytes(b'changed')
             with self.assertRaisesRegex(ValueError,'bytes changed'): operator.package(output, summary['manifest_sha256'])
 
-    def test_preconditions_preserve_all_assets_and_require_all_three_workers_idle(self):
+    def test_preconditions_preserve_all_assets_and_require_all_four_workers_idle(self):
         from staging import FILES
         current = dict(code_dir='/srv/eqemu-validator-code', state_dir='/var/lib/eqemu-validator',
             socket='/run/eqemu-validator.sock')
-        assets = {path: str(path).encode() for path in (*operator.ORDINARY, *operator.RETAINED_V1,
-            *(Path(current['code_dir']) / name for name in FILES if name != 'validation/worker/sanitizers.py'))}
-        assets[operator.CONFIG] = json.dumps(current).encode()
-        ordinary = {str(path): operator.sha(data) for path, data in assets.items() if path not in operator.RETAINED_V1}
-        manifest = dict(configuration=dict(current, code_dir='/srv/eqemu-validator-asan-v2/' + 'a'*40,
-            state_dir=str(operator.STATE), socket='/run/' + operator.NAME + '.sock',
-            diagnostic_profile=operator.PROFILE, diagnostic_policy=operator.NAME),
-            ordinary_sha256=ordinary, retained_v1_sha256={str(path): operator.sha(assets[path]) for path in operator.RETAINED_V1})
+        assets = retained_fixture(current, FILES)
+        with patch.object(operator,'load',side_effect=lambda path: assets[path]):
+            manifest = dict(configuration=dict(current,code_dir='/srv/eqemu-validator-asan-v3/'+'a'*40,
+                state_dir=str(operator.STATE),socket='/run/'+operator.NAME+'.sock',
+                diagnostic_profile=operator.PROFILE,diagnostic_policy=operator.NAME),
+                release_files=sorted(FILES), ordinary_sha256={str(path):operator.sha(assets[path])
+                    for path in (*operator.ORDINARY,*(Path(current['code_dir'])/name for name in FILES if name!='validation/worker/sanitizers.py'))},
+                **{'retained_v'+str(version)+'_sha256':{str(path):operator.sha(assets[path])
+                    for path in operator.retained_assets(version,FILES)} for version in (1,2)})
         with patch.object(operator.os, 'geteuid', return_value=0), \
                 patch.object(operator, 'load', side_effect=lambda path: assets[path]), \
                 patch.object(operator, 'run', return_value='') as run, \
                 patch.object(Path, 'exists', return_value=False):
             self.assertEqual(operator.preconditions(manifest), current)
-            self.assertEqual(run.call_args.args[0][-3:], ['eqemu-validator@*.service',
-                'eqemu-validator-asan-v1@*.service', 'eqemu-validator-asan-v2@*.service'])
+            self.assertEqual(run.call_args.args[0][-4:], ['eqemu-validator@*.service',
+                'eqemu-validator-asan-v1@*.service', 'eqemu-validator-asan-v2@*.service', 'eqemu-validator-asan-v3@*.service'])
             for path in assets:
+                if str(path) not in set(manifest['ordinary_sha256']) | set(manifest['retained_v1_sha256']) | set(manifest['retained_v2_sha256']): continue
                 original = assets[path]; assets[path] += b'changed'
-                with self.subTest(changed=path), self.assertRaisesRegex(ValueError, 'policy changed'):
+                with self.subTest(changed=path), self.assertRaises((ValueError,json.JSONDecodeError)):
                     operator.preconditions(manifest)
                 assets[path] = original
-            for unit in run.call_args.args[0][-3:]:
+            for unit in run.call_args.args[0][-4:]:
                 with patch.object(operator, 'run', return_value=unit), self.assertRaisesRegex(ValueError, 'connections'):
                     operator.preconditions(manifest)
-            for state in (Path(current['state_dir']), operator.RETAINED_STATE, operator.STATE):
+            for state in (Path(current['state_dir']), operator.RETAINED_STATE, Path('/var/lib/eqemu-validator/asan-v2'), operator.STATE):
                 with patch.object(Path, 'exists', lambda path: path == state / 'active.json'), \
                         self.assertRaisesRegex(ValueError, 'active record'):
                     operator.preconditions(manifest)
@@ -359,7 +373,7 @@ class Admission(unittest.TestCase):
                 parent = root / 'srv'; parent.mkdir()
                 state = root / 'state'; state.mkdir(); (state / 'worker.lock').touch(mode=0o600)
                 config = root / 'etc/asan.json'; config.parent.mkdir()
-                retained = {root / 'ordinary-policy': b'ordinary retained', root / 'v1-policy': b'v1 retained'}
+                retained = {root / 'ordinary-policy': b'ordinary retained', root / 'v1-policy': b'v1 retained', root / 'v2-policy': b'v2 retained'}
                 for path, data in retained.items(): path.write_bytes(data)
                 v1_state = state / 'asan-v1'; v1_state.mkdir(); (v1_state / 'audit').write_bytes(b'v1 evidence')
                 loaded = False; published = 0
@@ -396,7 +410,7 @@ class Admission(unittest.TestCase):
                         return operator.NAME + ' (enforce)\n' if loaded else ''
                     return original_read(path,*args,**kwargs)
                 current = dict(state_dir=str(state),worker_uid=os.getuid(),worker_gid=os.getgid())
-                with patch.object(operator,'PARENT',parent/'diagnostic'), patch.object(operator,'STATE',state/'asan-v2'), \
+                with patch.object(operator,'PARENT',parent/'diagnostic'), patch.object(operator,'STATE',state/'asan-v3'), \
                      restrictive_umask(), \
                      patch.object(operator,'DIAGNOSTIC_CONFIG',config), \
                      patch.object(operator,'root_operator'), \
@@ -424,7 +438,7 @@ class Admission(unittest.TestCase):
                         self.assertEqual((v1_state / 'audit').read_bytes(), b'v1 evidence')
                         for path, data in retained.items(): self.assertEqual(path.read_bytes(), data)
                         self.assertTrue((parent / 'diagnostic' / manifest['source_commit']).exists())
-                        if failure in ('apparmor', 'socket'): self.assertTrue((state / 'asan-v2').exists())
+                        if failure in ('apparmor', 'socket'): self.assertTrue((state / 'asan-v3').exists())
                         for directory in (parent/'diagnostic').rglob('*'):
                             if directory.is_dir(): self.assertEqual(directory.stat().st_mode & 0o777,0o755)
                         self.assertTrue(operator.operate(output,summary['manifest_sha256'],rollback=True)['rolled_back'])

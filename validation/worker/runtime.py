@@ -37,6 +37,7 @@ CONTROLS = ('pass', 'assertion', 'missing-result', 'deadline', 'controller-death
 OWNED_CONTROLS = (*CONTROLS, 'build', 'format', 'check-format', 'quick')
 FORMAT_SECONDS = 900
 IMPLEMENTATION_FILES = ('validation/worker/runtime.py', 'validation/worker/guest.py',
+    'validation/worker/profile_contract.py', 'validation/worker/profiling.py', 'validation/worker/profile_artifacts.py', 'validation/worker/profile_inputs.py',
     'validation/worker/build_guest.py', 'validation/worker/normal_world.py', 'validation/actor.py',
     'validation/actor_runtime.py', 'validation/debugger.py', 'validation/runtime-fixture.json',
     'validation/worker/client.py', 'scripts/check-validation-worker',
@@ -74,8 +75,13 @@ def root_file(path):
 def config(path=CONFIG):
     value = read_json(root_file(path))
     required = {'version', 'user', 'worker_uid', 'worker_gid', 'state_dir', 'code_dir', 'submitter', 'socket', 'base_image'}
-    if set(value) != required or type(value['version']) is not int or value['version'] != 1:
+    from profile_contract import EXTRA_FIELDS, validate as validate_profile, verify_release
+    profiling=value.get('selection')=='profiling-v1'
+    if set(value) != required | (EXTRA_FIELDS if profiling else set()) or type(value['version']) is not int or value['version'] != 1:
         raise ValueError('Unsupported worker configuration')
+    if profiling:
+        validate_profile(value,path,read_json(root_file(CONFIG)))
+        verify_release(value,root_file)
     for key in ('state_dir', 'code_dir', 'socket', 'base_image'):
         if not isinstance(value[key], str) or not Path(value[key]).is_absolute() or any(ch in value[key] for ch in ',\n\r'):
             raise ValueError('Unsupported configured path: ' + key)
@@ -133,10 +139,9 @@ def ready(value):
     try:
         observed['apparmor'] = Path('/proc/self/attr/current').read_text().strip()
         # An unconfined stack member does not remove the enforcing profile's restrictions.
+        name='eqemu-validator-profiling' if value.get('selection')=='profiling-v1' else 'eqemu-validator'
         checks['apparmor'] = observed['apparmor'] in (
-            'eqemu-validator (enforce)',
-            'eqemu-validator//&unconfined (enforce)',
-            'unconfined//&eqemu-validator (enforce)',
+            name+' (enforce)',name+'//&unconfined (enforce)','unconfined//&'+name+' (enforce)',
         )
     except OSError:
         checks['apparmor'] = False
@@ -198,8 +203,16 @@ def persisted_report(report):
 
 
 def acquire(value):
-    fd = os.open(Path(value['state_dir']) / 'worker.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    from profile_contract import SHARED_LOCK
+    profiling=value.get('selection')=='profiling-v1'
+    if profiling and value.get('shared_lock')!=SHARED_LOCK: raise ValueError('Unexpected shared profiling lock')
+    path=Path(SHARED_LOCK) if profiling else Path(value['state_dir'])/'worker.lock'
+    if profiling and path.resolve()!=path: raise ValueError('Shared lock path traverses a symlink')
+    fd=os.open(path,os.O_RDWR | os.O_NOFOLLOW | (0 if profiling else os.O_CREAT),0o600)
     try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=value['worker_uid'] or info.st_gid!=value['worker_gid'] or stat.S_IMODE(info.st_mode)!=0o600:
+            raise ValueError('Worker lock must be an owned regular mode-0600 file')
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BaseException:
         os.close(fd)
@@ -212,7 +225,7 @@ def scratch_cleanup(job):
     if scratch.exists():
         if scratch.is_symlink() or scratch.stat().st_uid != os.geteuid():
             raise RuntimeError('Unexpected worker scratch ownership')
-        if not {item.name for item in scratch.iterdir()} <= set(SCRATCH):
+        if not {item.name for item in scratch.iterdir()} <= set(SCRATCH) | {'profile-requested'}:
             raise RuntimeError('Unexpected worker scratch contents')
         for item in scratch.iterdir():
             if item.is_symlink() or not item.is_file():
@@ -272,6 +285,8 @@ def cleanup(value):
                 report['scratch_removed'] = True
             except (OSError, ValueError, CleanupError) as error:
                 report['cleanup_error'] = str(error)[:1000]
+            if (job/'profiles').exists():
+                retain_profiles(job,Path(value['state_dir']),job.name,report)
             atomic_json(Path(value['state_dir']) / 'last-result.json', report)
             if not report['scratch_removed']:
                 return 2  # Retain the active marker and scratch when process absence is uncertain.
@@ -339,6 +354,14 @@ def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, 
     pending = bytearray()
     discarding = False
     notified = False
+    profile_sink = None
+    profile_error = None
+    profile_mode = None
+    if build_result is not None and (scratch/'profile-requested').exists():
+        from profile_artifacts import Sink
+        profile_sink=Sink(scratch.parent/'profiles')
+        profile_request=json.loads((scratch/'profile-requested').read_text())
+        profile_mode=profile_request['profiling']
     started_at = time.monotonic()
     try:
         if on_started is not None:
@@ -381,6 +404,11 @@ def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, 
                                     connection.sendall(b'{"version":1,"kind":"progress","name":"normal-world-ready"}\n')
                                 finally:
                                     connection.settimeout(None)
+                            if not discarding and profile_sink is not None and line.startswith(b'EQEMU_PROFILE '):
+                                try:
+                                    profile_sink.accept(json.loads(line.removeprefix(b'EQEMU_PROFILE ')))
+                                except Exception as error:
+                                    profile_error=type(error).__name__
                             discarding = False
                         # Ignore oversized serial lines; never forward guest text.
                         if len(pending) > 65536:
@@ -402,6 +430,9 @@ def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, 
     finally:
         stop_process(process)
         process.stdout.close()
+        if profile_sink is not None:
+            build_result['profile_transport']=dict(artifacts=profile_sink.inventory(),export_error=profile_error,
+                complete=False,partial=True)
     results = []
     with log.open('rb') as stream:
         for line in stream:
@@ -466,6 +497,18 @@ def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, 
             if normal['binaries']['zone'] != result['zone_sha256']:
                 raise RuntimeError('Normal-world zone differs from built candidate')
         build_result.update(result)
+        if profile_sink is not None:
+            complete=not profile_error and result.get('normal_world',{}).get('profiling',{}).get('complete') is True and result['normal_world']['profiling'].get('mode')==profile_mode
+            if complete:
+                try:
+                    from profile_artifacts import validate_collection
+                    validate_collection(profile_sink.directory,profile_mode,profile_request['candidate'],
+                        profile_request['tree'],result['normal_world']['binaries'])
+                except Exception as error:
+                    complete=False
+                    build_result['profile_transport']['export_error']=type(error).__name__
+            build_result['profile_transport'].update(complete=complete,partial=not complete)
+            if not complete: return 2
     return result['exit_code']
 
 
@@ -547,6 +590,8 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
         payload = build if build is not None else quick if quick is not None else formatting
         if payload is not None:
             receive_payload(connection, scratch / 'payload.iso', payload, time.monotonic() + 120)
+        if build is not None and build.get('profiling'):
+            (scratch/'profile-requested').write_text(json.dumps({key:build[key] for key in ('profiling','candidate','tree')}))
         (scratch / 'user-data').write_text(build_user_data(run_id) if build is not None else
                                          quick_user_data(run_id,quick) if quick is not None else
                                          format_user_data(run_id, formatting) if formatting is not None else user_data(run_id, control))
@@ -593,8 +638,8 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
             report['exit_code'] = supervise(args, scratch, job / 'serial.log', connection, deadline, run_id, started)
         else:
             detail = {}
-            report['exit_code'] = supervise(args, scratch, job / 'serial.log', connection, deadline, run_id, started, detail)
             report['guest'] = detail
+            report['exit_code'] = supervise(args, scratch, job / 'serial.log', connection, deadline, run_id, started, detail)
             report['completed_checks'] = detail['completed_checks']
             if report['implementation_sha256'] != implementation_identity(value):
                 raise RuntimeError('Worker implementation changed during the job')
@@ -622,16 +667,43 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
             report.setdefault('timings', {})['total_seconds'] = round(time.monotonic() - started_at, 3)
             if formatting is not None and report['exit_code'] != 0:
                 report.update(changed_files=[], output_snapshot_sha256=formatting['input_snapshot_sha256'])
+        if (job/'profiles').exists():
+            try: retain_profiles(job,state,run_id,report)
+            except Exception as error:
+                report.update(exit_code=2,profile_export_error=type(error).__name__,profile_retention_complete=False)
         if job.exists():
             atomic_json(state / 'last-result.json', persisted_report(report))
             if (job / 'serial.log').exists():
                 os.replace(job / 'serial.log', state / 'last-serial.log')
-            if report['cleanup_complete']:
+            if report['cleanup_complete'] and not (job/'profiles').exists():
                 job.rmdir()
-        if active.exists() and read_json(active).get('run_id') == run_id and report['cleanup_complete']:
+        if active.exists() and read_json(active).get('run_id') == run_id and report['cleanup_complete'] and report.get('profile_retention_complete',True):
             active.unlink()
+        if report.get('profile_artifacts'):
+            try:
+                from profile_artifacts import send
+                connection.settimeout(30)
+                with connection.makefile('wb') as stream:
+                    send(state/'last-profile',stream)
+            except Exception as error:
+                report.update(exit_code=2,profile_client_export_error=type(error).__name__)
+                atomic_json(state/'last-result.json',persisted_report(report))
+            finally: connection.settimeout(None)
         os.close(lock)
     return report
+
+
+def retain_profiles(job,state,run_id,report):
+    """Retain one bounded private collection independently of disposable VM cleanup."""
+    from profile_artifacts import inventory
+    current=state/'last-profile'
+    if current.exists():
+        inventory(current)
+        for path in current.iterdir(): path.unlink()
+        current.rmdir()
+    os.replace(job/'profiles',current)
+    report['profile_artifacts']=dict(run_id=run_id,files=inventory(current),
+        retention='one collection, replaced by next profiling run; operator may delete sooner')
 
 
 def request(connection, value):
@@ -658,8 +730,26 @@ def request(connection, value):
     if data == {'version': 1, 'operation': 'last-result'}:
         return {'version': 1, 'operation': 'last-result', 'scope': 'worker-observation',
                 'exit_code': 0, 'result': read_json(Path(value['state_dir']) / 'last-result.json', limit=65536)}
+    if data.get('operation')=='profile-artifacts':
+        if set(data)!={'version','operation','run_id'} or not isinstance(data['run_id'],str) or not re.fullmatch('[a-f0-9]{32}',data['run_id']):
+            raise ValueError('Exact profiling run ID required')
+        from profile_artifacts import inventory, send
+        lock=acquire(value)
+        try:
+            report=read_json(Path(value['state_dir'])/'last-result.json',limit=65536)
+            if report.get('run_id')!=data['run_id'] or report.get('profile_artifacts',{}).get('run_id')!=data['run_id']:
+                raise ValueError('Requested profile is no longer retained')
+            directory=Path(value['state_dir'])/'last-profile'
+            files=inventory(directory)
+            if files!=report['profile_artifacts']['files']: raise ValueError('Retained profile changed')
+            connection.settimeout(30)
+            with connection.makefile('wb') as stream: send(directory,stream)
+            return dict(version=1,operation='profile-artifacts',scope='profile-export-only',exit_code=0,executed=False,
+                run_id=data['run_id'],workload_exit_code=report['exit_code'],profile_artifacts=report['profile_artifacts'])
+        finally: os.close(lock)
     if data.get('operation') == 'build':
-        if (set(data) != {'version', 'operation', 'candidate', 'tree', 'bytes', 'sha256'}
+        if (set(data) != {'version', 'operation', 'candidate', 'tree', 'bytes', 'sha256'} | ({'profiling'} if 'profiling' in data else set())
+                or ('profiling' in data and data['profiling'] not in ('timeline','heaptrack','perf'))
                 or not all(isinstance(data[key], str) and re.fullmatch('[a-f0-9]{40}', data[key]) for key in ('candidate', 'tree'))
                 or not isinstance(data['sha256'], str) or not re.fullmatch('[a-f0-9]{64}', data['sha256'])
                 or type(data['bytes']) is not int or not 0 < data['bytes'] <= PAYLOAD_LIMIT):
@@ -728,7 +818,7 @@ def main(argv=None):
         except Exception as error:
             result = {'version': 1, 'exit_code': 2, 'error': str(error)[:1000], 'scope': 'worker-smoke'}
         try:
-            connection.settimeout(5)
+            connection.settimeout(30)
             connection.sendall((json.dumps(result, separators=(',', ':')) + '\n').encode())
         except OSError:
             pass  # A disconnected client cannot prevent owned cleanup/result persistence.

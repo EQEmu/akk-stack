@@ -19,8 +19,18 @@ def record(path, limit=PAYLOAD_LIMIT):
     return inputs.file_record(Path(path), limit)
 
 
-def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world_control=None):
+def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world_control=None, profiling=None, profiler_input=None, profiler_sha256=None):
     """Select a complete clean commit, without freezing Cargo manifests or test counts."""
+    if profiling is not None:
+        from profiling import MODES
+        if profiling not in MODES: raise ValueError('Unknown profiling mode')
+    if profiler_input is not None:
+        from profile_inputs import manifest, digest
+        if profiling not in ('heaptrack','perf') or digest(profiler_input)!=profiler_sha256:
+            raise ValueError('Profiler input needs selected mode and exact SHA256')
+        manifest(profiler_input)
+    elif profiler_sha256 is not None:
+        raise ValueError('Profiler SHA256 requires an input bundle')
     profile = json.loads((Path(__file__).resolve().parents[1] / 'profile.json').read_text())
     for path, expected in ((native, NATIVE_SHA), (rust, RUST_SHA)):
         if record(path)['sha256'] != expected:
@@ -58,8 +68,10 @@ def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world
         files = {'eqemu.tar': archive, 'websocketpp.tar': dep_archive,
                  'native.iso': Path(native).resolve(), 'rust-inputs.tar': Path(rust).resolve(),
                  'runtime.iso': Path(runtime).resolve()}
+        if profiler_input is not None: files['profilers.tar']=Path(profiler_input).resolve()
         identity = {'version': 1, 'candidate': commit, 'tree': tree,
                     'files': {name: record(path) for name, path in files.items()}, 'world_control': world_control}
+        if profiling is not None: identity['profiling']=profiling
         # Repeat after archiving: dirty index/worktree changes must not silently disappear.
         view.clean(commit, entries, links)
         (root / 'identity.json').write_text(json.dumps(identity))
@@ -75,7 +87,8 @@ def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world
             # Detect changes to public media while the ISO builder read it.
             if any(record(path) != identity['files'][name] for name, path in files.items()):
                 raise ValueError('Offline input changed while packaging')
-            return dict(version=1, operation='build', candidate=commit, tree=tree, **payload)
+            return dict(version=1, operation='build', candidate=commit, tree=tree, **payload,
+                        **({'profiling':profiling} if profiling is not None else {}))
         except BaseException:
             Path(output).unlink(missing_ok=True)
             raise

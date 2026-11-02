@@ -27,8 +27,25 @@ def main():
     parser.add_argument('--config', type=Path, default=CONFIG)
     parser.add_argument('--prepare-only', type=Path, metavar='OUTPUT_ISO')
     parser.add_argument('--identity', action='store_true', help='Print AFK contract identity without connecting to the worker or running candidate code')
+    parser.add_argument('--export-profile', help='Read-only export of the exact last retained profiling run ID; starts no VM')
+    parser.add_argument('--profiling', choices=('timeline','heaptrack','perf'), help='Opt-in independent profiling of the fixed normal-world workload')
+    parser.add_argument('--profile-output', type=Path, help='Fresh private directory for bounded separate raw artifacts')
+    parser.add_argument('--profiler-input', type=Path, help='Optional pinned offline profiler-package tar')
+    parser.add_argument('--profiler-input-sha256', help='Exact SHA256 of reviewed profiler-package tar')
     args = parser.parse_args()
+    if args.identity and args.profiling: parser.error('--identity does not select profiling modes')
+    if args.profiling and not (args.prepare_only or args.profile_output):
+        parser.error('--profiling requires --profile-output or --prepare-only')
+    if not args.profiling and (args.profile_output and not args.export_profile or args.profiler_input or args.profiler_input_sha256):
+        parser.error('Profile options require --profiling')
     try:
+        if args.export_profile:
+            if args.profiling or args.prepare_only or args.identity or not args.profile_output:
+                raise ValueError('--export-profile requires only --profile-output and optional --config')
+            config=json.loads(args.config.read_text())
+            report=exchange(config['socket'],dict(version=1,operation='profile-artifacts',run_id=args.export_profile),profile_output=args.profile_output)
+            print(json.dumps(report,separators=(',',':')))
+            return report['exit_code']
         fixture = json.loads((Path(__file__).resolve().parents[1] / 'validation/runtime-fixture.json').read_text())
         runtime_input = args.runtime_input or args.input_store / fixture['iso']['path']
         if args.identity:
@@ -46,12 +63,12 @@ def main():
                 if int(readiness['observed']['resources']['memory.max']) < 6 * 1024**3:
                     raise RuntimeError('Apply the reviewed 6 GiB/18360-second worker service update first')
             request = prepare(args.repo, args.commit, args.websocketpp or args.repo / 'submodules/websocketpp',
-                              args.input_store / 'build-inputs-20260925-v3/build-inputs.iso', args.rust_input, output, runtime_input, args.world_control)
+                              args.input_store / 'build-inputs-20260925-v3/build-inputs.iso', args.rust_input, output, runtime_input, args.world_control, args.profiling, args.profiler_input, args.profiler_input_sha256)
             if args.prepare_only:
                 # Preparation success is explicitly not an execution pass.
                 print(json.dumps(dict(scope='prepared-input-only', executed=False, request=request)))
                 return 0
-            report = exchange(config['socket'], request, output)
+            report = exchange(config['socket'], request, output, profile_output=args.profile_output) if args.profiling else exchange(config['socket'], request, output)
             directory = os.environ.get('VALIDATION_AFK_EVIDENCE_DIR')
             if report.get('exit_code') in (0, 1, 2) and report.get('guest', {}).get('normal_world'):
                 directory = directory or Path.home()/'.local/state/eqemu-rust-validator/runs'/report['run_id']

@@ -363,7 +363,8 @@ def validate(value):
     required = {'exit_code', 'cleanup_complete', 'control', 'ready_seconds', 'baseline_seconds',
                 'responsive_samples', 'cpu_ticks', 'clock_ticks_per_second',
                 'fixture_manifest_sha256', 'binaries', 'database_cleanup', 'inserver_tests'}
-    if not isinstance(value, dict) or set(value) != required:
+    optional={'profiling','profile_processes'} if isinstance(value,dict) and 'profiling' in value else set()
+    if not isinstance(value, dict) or set(value) != required | optional:
         raise ValueError('Missing normal-world baseline')
     if (type(value['exit_code']) is not int or value['exit_code'] != 0 or value['control'] is not None
             or value['cleanup_complete'] is not True or value['database_cleanup'] is not True):
@@ -383,19 +384,23 @@ def validate(value):
             or not isinstance(value['binaries'], dict) or set(value['binaries']) != {'world', 'zone', 'shared_memory'}
             or any(not isinstance(d, str) or not re.fullmatch('[a-f0-9]{64}', d) for d in value['binaries'].values())):
         raise ValueError('Normal-world input/output identity')
+    if optional and (not isinstance(value['profiling'],dict) or value['profiling'].get('complete') is not True):
+        raise ValueError('Requested profiling incomplete')
     suite = validate_inserver(value['inserver_tests'])
     if suite['passed'] is not True:
         raise ValueError('In-server suite failed')
     return value
 
 
-def observe(binary_dir, server, control):
+def observe(binary_dir, server, control, profile_config=None):
     """Unprivileged source-owned assertion with bounded diagnostics on every path."""
     if os.geteuid() == 0 or not Path('/opt/eqemu-worker-build-guest').is_file():
         raise RuntimeError('Unprivileged disposable guest only')
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_FSIZE, (1024**2, 1024**2))
     processes = []
+    profilers = []
+    profile = json.loads(Path(profile_config).read_text()) if profile_config else None
     logs = []
     cancelled = False
     ready = False
@@ -419,6 +424,8 @@ def observe(binary_dir, server, control):
                 observation['condition'] = 'deadline'
                 error = InserverFailure if ready and control != 'cancel' else RuntimeError
                 raise error('Normal-world deadline or missing in-server completion')
+            if any(p.poll() is not None for p in profilers):
+                raise RuntimeError('Requested perf collector exited early')
             if any(p.poll() is not None for p in processes):
                 observation['condition'] = 'child-exit'
                 error = InserverFailure if ready else RuntimeError
@@ -451,8 +458,19 @@ def observe(binary_dir, server, control):
                     env.update(EQEMU_INSERVER_TEST_RUN=run_id, EQEMU_INSERVER_TEST_RESULT=str(result_path))
                     if control == 'assertion':
                         env['EQEMU_INSERVER_TEST_CONTROL'] = 'assertion'
+                if profile and profile['mode']=='heaptrack':
+                    from profiling import TOOLS
+                    env.update(LD_PRELOAD=TOOLS['heaptrack'][0], DUMP_HEAPTRACK_OUTPUT=str(Path(profile['directory'])/(name+'.fifo')))
                 processes.append(subprocess.Popen([str(binary_dir / name), *args], cwd=cwd, env=env,
                     stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT))
+                if profile and profile['mode']=='perf':
+                    from profiling import FILE_LIMIT
+                    def limits():
+                        resource.setrlimit(resource.RLIMIT_FSIZE,(FILE_LIMIT,FILE_LIMIT))
+                    profilers.append(subprocess.Popen(['/usr/bin/perf','record','-e','task-clock:u','-F','99',
+                        '--call-graph','fp,32','--no-buildid-cache','-m','64','-o',
+                        str(Path(profile['directory'])/(name+'.perf.data')),'-p',str(processes[-1].pid)],
+                        stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,preexec_fn=limits))
         while True:
             guard()
             if responsive():
@@ -498,8 +516,15 @@ def observe(binary_dir, server, control):
             except Exception as error:
                 before_cleanup = dict(version=1, run_id=run_id, capture_error=bounded_text(error, 256))
             cleanup = {}
+            if profile:
+                result['profile_processes']=dict(before_cleanup=[dict(name=name,pid=p.pid,returncode=p.poll()) for name,p in zip(('world','zone'),processes)],
+                    traces_may_be_incomplete=True, reason='Native shutdown is owned by existing cleanup, which may terminate profilers before finalization')
             try:
                 result['cleanup_complete'] = stop(processes, diagnostics=cleanup)
+                for p in profilers: p.wait(timeout=5)
+                if profile:
+                    result['profile_processes']['after_cleanup']=[dict(name=name,pid=p.pid,returncode=p.poll()) for name,p in zip(('world','zone'),processes)]
+                    result['profile_processes']['perf_exit_codes']=[p.returncode for p in profilers]
             except Exception as error:
                 result.update(exit_code=2, cleanup_complete=False, cleanup_error=bounded_json_text(error, 500))
                 cleanup['error'] = result['cleanup_error']
@@ -599,6 +624,8 @@ def run(build, identity):
     clean = False
     result = None
     error = None
+    profiling_session = None
+    profile_result = None
     binaries = {name: build.sha(build.WORK / 'build/bin' / name) for name in ('world', 'zone', 'shared_memory')}
     try:
         MEDIA.mkdir()
@@ -625,11 +652,26 @@ def run(build, identity):
                 os.chown(path, account.pw_uid, account.pw_gid)
         prefix = ['/usr/bin/setpriv', '--reuid=' + str(account.pw_uid), '--regid=' + str(account.pw_gid),
                   '--clear-groups', '--no-new-privs']
+        if identity.get('profiling'):
+            from profiling import Session, tool
+            mode=identity['profiling']
+            profiling_session=Session(mode, build.WORK/'profiles', {name:build.WORK/'build/bin'/name for name in ('world','zone')},
+                account.pw_uid, min(build.DEADLINE,time.monotonic()+SECONDS),
+                dict(source=identity, build=build.BUILD_METADATA, workload=dict(name='master-normal-world',control=control,
+                    warmup='readiness probe',repetitions=1,baseline_seconds=BASELINE_SECONDS,comparison=False),
+                    fixture_manifest_sha256=fixture['manifest_sha256'])).start()
+            if mode=='perf':
+                check=tool(['/usr/bin/perf','record','-e','task-clock:u','-F','99','--call-graph','fp,32',
+                    '--no-buildid-cache','-o',str(build.WORK/'perf-preflight.data'),'--','/bin/true'],
+                    prefix=prefix, output=build.WORK/'perf-preflight.log')
+                if check: raise RuntimeError('Requested perf mode unavailable for guest event task-clock:u under native identity')
+            profiling_session.stage('shared-memory','started')
         runtime.command('normal-shared-memory', [*prefix, str(build.WORK / 'build/bin/shared_memory')], cwd=server, timeout=180)
         for name in ('items', 'spells'):
             path = server / 'shared' / name
             if not path.is_file() or path.is_symlink() or not 0 < path.stat().st_size <= 768*1024**2:
                 raise RuntimeError('Missing generated shared data: ' + name)
+        if profiling_session: profiling_session.stage('shared-memory','completed')
         ready = False
         def phase(line):
             nonlocal ready
@@ -637,9 +679,11 @@ def run(build, identity):
                 if ready:
                     raise RuntimeError('Duplicate normal-world readiness phase')
                 ready = True
+                if profiling_session: profiling_session.stage('ready','completed')
                 build.emit({'kind': 'stage', 'name': 'normal-world-ready', 'state': 'started'})
         output = runtime.command('normal-world', [*prefix, '/usr/bin/python3', '/opt/normal_world.py',
-                                  str(build.WORK / 'build/bin'), str(server), control or 'positive'],
+                                  str(build.WORK / 'build/bin'), str(server), control or 'positive',
+                                  *([str(profiling_session.directory/'config.json')] if profiling_session else [])],
                                  timeout=OBSERVE_SECONDS+30, on_line=phase)
         frames = [json.loads(line.removeprefix('NORMAL_WORLD_RESULT ')) for line in output.splitlines()
                   if line.startswith('NORMAL_WORLD_RESULT ')]
@@ -681,9 +725,20 @@ def run(build, identity):
             clean = False
             error = runtime.scrub(str(exc))[-1000:]
         finally:
+            if profiling_session:
+                try:
+                    profile_result=profiling_session.finish()
+                    if not profile_result['complete']:
+                        error=error or 'Requested profiling incomplete: '+str(profile_result.get('error') or 'artifact truncated')
+                except Exception as exc:
+                    error=error or 'Requested profiling finalization failed: '+type(exc).__name__
+                    profile_result=dict(mode=identity['profiling'],complete=False,error=type(exc).__name__)
             for sig, handler in prior.items():
                 signal.signal(sig, handler)
+    if profile_result is not None and result is None:
+        result=dict(exit_code=2,cleanup_complete=False,control=control)
     if isinstance(result, dict):
+        if profile_result is not None: result['profiling']=profile_result
         result.update(fixture_manifest_sha256=fixture['manifest_sha256'], binaries=binaries, database_cleanup=clean)
         if error:
             result['adapter_error'] = bounded_json_text(error, 1000)
@@ -703,4 +758,4 @@ def run(build, identity):
 
 
 if __name__ == '__main__':
-    observe(Path(sys.argv[1]), Path(sys.argv[2]), None if sys.argv[3] == 'positive' else sys.argv[3])
+    observe(Path(sys.argv[1]), Path(sys.argv[2]), None if sys.argv[3] == 'positive' else sys.argv[3], sys.argv[4] if len(sys.argv)>4 else None)

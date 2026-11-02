@@ -1,0 +1,187 @@
+"""Additive publication tested on a synthetic filesystem. No real root/service calls."""
+import copy
+import json
+import os
+from pathlib import Path
+import pwd
+import stat
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+ROOT=Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(ROOT/'validation/worker'))
+import profile_contract as contract
+import profile_release as release
+import runtime
+import test_runtime
+
+
+class FakeHost(release.Host):
+    def __init__(self,root):
+        super().__init__(root);self.owners={};self.calls=[];self.active=False;self.fail_after=None;self.writes=0
+    def info(self,path):
+        info=list(path.lstat()); info[4],info[5]=self.owners.get(str(path),(0,0))
+        return os.stat_result(info)
+    def chown(self,path,uid,gid):
+        self.owners[str(path)]=(uid,gid);self.writes+=1
+        if self.fail_after==self.writes: raise RuntimeError('injected publication interruption')
+    def run(self,args):
+        self.calls.append(args)
+        if args[1]=='list-units': return 'eqemu-validator@1.service loaded active running\n' if self.active else ''
+        return ''
+    def processes(self): pass
+
+
+class Publication(unittest.TestCase):
+    def setUp(self):
+        tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup)
+        self.root=Path(tmp.name);self.root.chmod(0o755)
+        self.host=FakeHost(self.root)
+        for path in ('/etc/eqemu-validator','/etc/systemd/system','/etc/apparmor.d','/srv','/var/lib/eqemu-validator'):
+            self.host.path(path).mkdir(parents=True,exist_ok=True)
+        self.ordinary=dict(version=1,user='worker',worker_uid=os.getuid(),worker_gid=os.getgid(),submitter=pwd.getpwuid(os.getuid()).pw_name,
+            state_dir='/var/lib/eqemu-validator',code_dir='/srv/ordinary',socket='/run/eqemu-validator.sock',base_image='/public/base.qcow2')
+        for name in ('config.json','asan-v1.json','asan-v2.json','asan-v3.json'):
+            config=dict(self.ordinary)
+            stem='eqemu-validator' if name=='config.json' else 'eqemu-validator-'+name.removesuffix('.json')
+            if name!='config.json': config['code_dir']='/srv/'+stem
+            dest=self.host.path('/etc/eqemu-validator/'+name);dest.write_text(json.dumps(config));dest.chmod(0o644)
+            code=self.host.path(config['code_dir'])
+            for file,mode in (('scripts/check-validation-worker',0o755),('validation/worker/runtime.py',0o644)):
+                path=code/file;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'retained asset');path.chmod(mode)
+                self.host.owners[str(path)]=(1000,1000) if name=='config.json' else (0,0)
+            for suffix in ('@.service','.socket'):
+                self.host.path('/etc/systemd/system/'+stem+suffix).write_bytes(b'retained unit')
+            self.host.path('/etc/apparmor.d/'+stem).write_bytes(b'retained profile')
+        lock=self.host.path(release.SHARED_LOCK);lock.touch(mode=0o600)
+        self.host.owners[str(lock)]=(self.ordinary['worker_uid'],self.ordinary['worker_gid'])
+        self.host.path('/var/lib/eqemu-validator').chmod(0o700)
+        self.host.owners[str(lock.parent)]=(self.ordinary['worker_uid'],self.ordinary['worker_gid'])
+        for path in self.root.rglob('*'):
+            if path.is_dir() and path!=lock.parent: path.chmod(0o755)
+        self.package=self.root/'package'
+        self.receipt=release.prepare(self.package,ROOT,self.ordinary,'a'*40,'b'*40)
+        self.before=release.retained(self.host)
+
+    def operation(self,name): return release.operate(self.host,self.package,self.receipt['package_sha256'],name)
+
+    def test_new_package_is_self_consistent_and_scope_exact(self):
+        value,files,config=release.load_package(self.package,self.receipt['package_sha256'])
+        self.assertEqual(set(contract.SOURCE_FILES),set(release.SOURCE_FILES))
+        contract.validate(config,contract.CONFIG,self.ordinary)
+        policy=files['apparmor'].decode()
+        self.assertIn('/etc/eqemu-validator/profiling.json r,',policy)
+        self.assertIn('/etc/eqemu-validator/config.json r,',policy)
+        self.assertIn('/var/lib/eqemu-validator-inputs',policy) if 'inputs' in self.ordinary['base_image'] else None
+        self.assertIn('profile eqemu-validator-profiling ',policy)
+        self.assertNotIn('peer=eqemu-validator,',policy)
+        self.assertIn('/var/lib/eqemu-validator/worker.lock rwk,',policy)
+        self.assertIn('CapabilityBoundingSet=\n',files['service'].decode())
+        self.assertIn('NoNewPrivileges=yes',files['service'].decode())
+        self.assertIn('MemoryMax=6G',files['service'].decode())
+        self.assertIn('profiling.json',files['service'].decode())
+        self.assertFalse(self.receipt['installed'])
+
+    def test_apply_verify_repeat_and_rollback_preserve_every_retained_asset(self):
+        self.operation('apply');self.operation('apply');self.operation('verify')
+        self.assertEqual(release.retained(self.host),self.before)
+        ordinary_helper=self.before['srv/ordinary/scripts/check-validation-worker']
+        self.assertEqual((ordinary_helper['uid'],ordinary_helper['gid'],ordinary_helper['mode']),(1000,1000,0o755))
+        for call in self.host.calls:
+            self.assertFalse(call[1:2] in (['start'],['enable']))
+        self.operation('rollback');self.operation('rollback')
+        self.assertEqual(release.retained(self.host),self.before)
+        self.assertFalse(self.host.path(release.CONFIG).exists())
+        self.assertFalse(self.host.path(release.RELEASE_ROOT+'/'+'a'*40).exists())
+
+    def test_partial_publication_can_finish_or_roll_back_repeatedly(self):
+        self.host.fail_after=5
+        with self.assertRaisesRegex(RuntimeError,'interruption'): self.operation('apply')
+        self.host.fail_after=None
+        self.operation('rollback');self.operation('rollback')
+        self.assertEqual(release.retained(self.host),self.before)
+        self.operation('apply');self.operation('verify')
+
+    def test_collision_drift_unknown_source_and_tampering_refuse(self):
+        collision=self.host.path(release.CONFIG);collision.write_bytes(b'not owned')
+        with self.assertRaisesRegex(ValueError,'collision'): self.operation('apply')
+        self.assertEqual(collision.read_bytes(),b'not owned');collision.unlink()
+        self.operation('apply')
+        code=self.host.path(release.RELEASE_ROOT+'/'+'a'*40)
+        unknown=code/'unknown.py';unknown.write_bytes(b'preserve')
+        with self.assertRaisesRegex(ValueError,'Unknown'): self.operation('rollback')
+        unknown.unlink()
+        target=code/'validation/worker/profiling.py';original=target.read_bytes();target.write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError,'changed'): self.operation('rollback')
+        self.assertTrue(self.host.path(release.CONFIG).exists())
+        target.write_bytes(original)
+        (self.package/'unknown').touch()
+        with self.assertRaisesRegex(ValueError,'Unknown'): self.operation('verify')
+
+    def test_lock_contention_bad_lock_mode_and_active_selection_refuse_before_mutation(self):
+        # Real flock uses the same inode across the old/new selection.
+        with release.shared_lock(self.host,self.ordinary):
+            with self.assertRaises(BlockingIOError): self.operation('apply')
+        self.host.active=True
+        with self.assertRaisesRegex(ValueError,'active'): self.operation('apply')
+        self.host.active=False
+        lock=self.host.path(release.SHARED_LOCK);lock.chmod(0o644)
+        with self.assertRaisesRegex(ValueError,'0600'): self.operation('apply')
+        lock.chmod(0o600)
+        self.assertFalse(self.host.path(release.JOURNAL).exists())
+
+    def test_malformed_new_selection_and_new_manifest_mutation_or_omission_refuse(self):
+        _,files,value=release.load_package(self.package,self.receipt['package_sha256'])
+        for key,bad in (('shared_lock','/tmp/alternate'),('confinement','eqemu-validator-extra'),
+                        ('selection','anything'),('source_commit','short'),('code_dir','/srv/ordinary'),
+                        ('state_dir','/var/lib/eqemu-validator'),('socket','/run/eqemu-validator.sock')):
+            changed=dict(value,**{key:bad})
+            with self.subTest(key=key),self.assertRaises(ValueError): contract.validate(changed,contract.CONFIG,self.ordinary)
+        self.operation('apply')
+        root=self.host.path(value['code_dir'])
+        def mapped(path): return self.host.path(path) if str(path).startswith('/srv/') else path
+        with patch.object(contract,'Path',side_effect=lambda p: root if str(p)==value['code_dir'] else Path(p)):
+            contract.verify_release(value,lambda p:p)
+            path=root/'validation/worker/profile_contract.py';old=path.read_bytes();path.write_bytes(b'bad')
+            with self.assertRaises(ValueError): contract.verify_release(value,lambda p:p)
+            path.unlink()
+            with self.assertRaises(FileNotFoundError): contract.verify_release(value,lambda p:p)
+            path.write_bytes(old)
+
+
+class RuntimeSelection(unittest.TestCase):
+    def test_profile_readiness_has_exact_label_and_ordinary_readiness_is_unchanged(self):
+        # Reuse the real host-readiness probes with only their read-only OS seam mocked.
+        base=test_runtime.Readiness()
+        base.test_enforcing_profile_accepts_only_known_unconfined_stack_forms()
+        value={'base_image':'/public/base','submitter':'submitter','selection':'profiling-v1'}
+        limits=dict(memory_max='unused',**{'memory.max':'64','pids.max':'64','memory.swap.max':'0','cpu.max':'200000 100000','no_new_privileges':'1','effective_capabilities':'0'})
+        from unittest.mock import Mock
+        file=Mock();file.stat.return_value.st_size=1
+        with patch.object(runtime,'invocation',return_value='a'*32),patch.object(runtime,'resource_state',return_value=limits), \
+                patch.object(runtime,'root_file',return_value=file),patch.object(runtime.os.path,'isfile',return_value=True), \
+                patch.object(runtime.os,'access',side_effect=lambda path,mode:path!='/home/submitter'), \
+                patch.object(runtime.os,'open',return_value=42),patch.object(runtime.os,'close'), \
+                patch.object(runtime.pwd,'getpwnam',return_value=Mock(pw_dir='/home/submitter')):
+            for label,wanted in (('eqemu-validator-profiling (enforce)',True),('eqemu-validator (enforce)',False),
+                                  ('eqemu-validator-profiling-extra (enforce)',False),('eqemu-validator-profiling (complain)',False)):
+                with patch.object(runtime.Path,'read_text',return_value=label):
+                    self.assertEqual(runtime.ready(value)['checks']['apparmor'],wanted)
+
+    def test_old_and_new_acquire_contend_on_exact_same_inode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state=Path(tmp);old=dict(state_dir=tmp,worker_uid=os.getuid(),worker_gid=os.getgid())
+            fd=runtime.acquire(old)
+            try:
+                with patch.object(contract,'SHARED_LOCK',str(state/'worker.lock')):
+                    new=dict(old,selection='profiling-v1',shared_lock=str(state/'worker.lock'))
+                    with self.assertRaises(RuntimeError): runtime.acquire(new)
+            finally: os.close(fd)
+            with patch.object(contract,'SHARED_LOCK',str(state/'worker.lock')):
+                new=dict(old,selection='profiling-v1',shared_lock=str(state/'worker.lock'))
+                fd=runtime.acquire(new)
+                try:
+                    with self.assertRaises(RuntimeError): runtime.acquire(old)
+                finally: os.close(fd)

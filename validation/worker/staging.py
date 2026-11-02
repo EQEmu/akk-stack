@@ -7,7 +7,8 @@ import shutil
 import stat
 import tempfile
 
-FILES = ('validation/worker/runtime.py', 'validation/worker/guest.py',
+FILES = ('validation/worker/profile_contract.py', 'validation/worker/profiling.py', 'validation/worker/profile_artifacts.py',
+         'validation/worker/profile_inputs.py', 'validation/worker/runtime.py', 'validation/worker/guest.py',
          'validation/worker/client.py', 'validation/worker/build_guest.py',
          'validation/worker/snapshot.py', 'validation/worker/format_guest.py',
          'validation/worker/quick_snapshot.py','validation/worker/quick_guest.py',

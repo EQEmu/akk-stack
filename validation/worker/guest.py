@@ -44,7 +44,7 @@ def build_user_data(nonce):
                 '    printf ' + shlex.quote('\\nEQEMU_WORKER_RESULT ' + json.dumps(failure) + '\\n') + ' "$status"\n'
                 'fi\n'
                 '/usr/sbin/poweroff\n')
-    helpers = [('normal_world.py', Path(__file__).with_name('normal_world.py')),
+    helpers = [(name, Path(__file__).with_name(name)) for name in ('profiling.py','profile_artifacts.py','profile_inputs.py','profile_contract.py')] + [('normal_world.py', Path(__file__).with_name('normal_world.py')),
                *[(name, Path(__file__).parents[1] / name) for name in
                  ('actor.py', 'actor_runtime.py', 'debugger.py', 'runtime-fixture.json')]]
     return '#cloud-config\n' + json.dumps({

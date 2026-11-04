@@ -36,7 +36,7 @@ BASE_LIMIT = 2 * 1024**3
 CONTROLS = ('pass', 'assertion', 'missing-result', 'deadline', 'controller-death')
 OWNED_CONTROLS = (*CONTROLS, 'build', 'format', 'check-format', 'quick')
 FORMAT_SECONDS = 900
-IMPLEMENTATION_FILES = ('validation/worker/runtime.py', 'validation/worker/guest.py',
+IMPLEMENTATION_FILES = ('validation/worker/actor_integration.py', 'validation/worker/integration_artifacts.py', 'validation/actor-integration-fixture.json', 'validation/worker/runtime.py', 'validation/worker/guest.py',
     'validation/worker/profile_contract.py', 'validation/worker/profiling.py', 'validation/worker/profile_artifacts.py', 'validation/worker/profile_inputs.py',
     'validation/worker/sanitizers.py',
     'validation/worker/build_guest.py', 'validation/worker/normal_world.py', 'validation/actor.py',

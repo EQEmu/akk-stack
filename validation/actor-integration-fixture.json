@@ -1,0 +1,736 @@
+{
+  "artifact": "central-cdau-integration-v1.json",
+  "event_contract": {
+    "actor_contexts": {
+      "count": 128,
+      "max_encoded_entry_including_separator": 256,
+      "registration": "immutable per native lifecycle/token tuple, new context on change; no pointer identities",
+      "tuple": [
+        "process_index",
+        "logical_actor_or_fixture_victim_ref",
+        "owner_epoch",
+        "native_id",
+        "native_incarnation",
+        "runtime_epoch",
+        "generation",
+        "goal",
+        "operation",
+        "actual_race",
+        "actual_class",
+        "actual_deity",
+        "actual_zone",
+        "context_kind",
+        "actual_level"
+      ],
+      "types": "firstprocref+logicalactorref0..3, sevenopaqueu64decimal, actualrace/class/deity/zoneu32, finitecontext_kindu8, actuallevelu8; complete encoded entry including separator <=256"
+    },
+    "blockers": [
+      "remote hint s.enabled schema mismatch; narrow Server repair separately authorized, no fake column",
+      "native map/Resolve/dry path and item admission unqualified",
+      "same-native XP500/threshold1000 gate unqualified; no formula substitution",
+      "two-zone resource/time feasibility unqualified",
+      "fixed private export and full result envelope budget require reviewed Stack disposition",
+      "root must choose exact scope/budget before event/harness source changes"
+    ],
+    "causality": "per-process process-start identity+monotonic sequence, actor owner_epoch/revision, native generation/incarnation/goal/operation and boot/ready transfer token; cross-process proof uses these causal edges, NOT wall timestamps alone",
+    "common_types": [
+      "procref",
+      "integer1..4096",
+      "integer0..1800000000",
+      "fixed_kind_enum",
+      "ctxref",
+      "u64dec",
+      "fixed_variant_payload"
+    ],
+    "encoding": {
+      "canonical": "compact UTF8 JSON, no pretty whitespace; source raw native JSON strings retained byte-exact",
+      "enums": "fixed finite numeric maps below, no free-text per event",
+      "f64": "finite roundtrip decimal strings <=32bytes in events; full native snapshots remain raw_json opaque text and integer-aware parsing",
+      "invariants": "unknown/missing keys, cap violations, invalid UTF8/value widths, per-process sequence gap or overflow invalidate acceptance; never truncate/sample/wrap; retain failure prefix and owned cleanup",
+      "u64": "strict decimal strings for opaque IDs/revisions/XP/thresholds; never JS-number roundtrip"
+    },
+    "enums": {
+      "attack_denial": {
+        "0": "allowed",
+        "1": "native_gate_rejected",
+        "2": "no_dispatch",
+        "3": "external_cancellation"
+      },
+      "body_phase": {
+        "0": "BODY_REGISTERED",
+        "1": "BODY_REMOVED",
+        "2": "NATIVE_DRAIN_OBSERVED",
+        "3": "READY_ACCEPTED",
+        "4": "INTENT_DURABLE",
+        "5": "RETIRE_REQUESTED",
+        "6": "LEASE_ACQUIRED",
+        "7": "LEASE_RELEASED",
+        "8": "ACTOR_DEFEATED"
+      },
+      "case": {
+        "0": "A",
+        "1": "B",
+        "2": "C"
+      },
+      "death_phase": {
+        "0": "native_death",
+        "1": "same_native_award_latch",
+        "2": "rust_credit_committed"
+      },
+      "direction": {
+        "0": "outgoing",
+        "1": "incoming"
+      },
+      "failure_cause": {
+        "0": "none",
+        "1": "storage",
+        "10": "timeout",
+        "11": "unexpected_event",
+        "12": "report_size",
+        "2": "native_identity",
+        "3": "overflow",
+        "4": "sequence_gap",
+        "5": "fixture_admission",
+        "6": "budget",
+        "7": "unobservable_tail",
+        "8": "schema",
+        "9": "geometry"
+      },
+      "fault_phase": {
+        "0": "command_accepted",
+        "1": "fixture_phase",
+        "2": "expected_fault_prefix_flushed",
+        "3": "io_failure",
+        "4": "overflow_or_gap"
+      },
+      "flags_bits": {
+        "0": "hate",
+        "1": "feigned",
+        "2": "invisible",
+        "3": "invisible_undead",
+        "4": "pet",
+        "5": "merchant",
+        "6": "combat_allowed",
+        "7": "special_faction"
+      },
+      "kind": {
+        "10": "resolved_reaction",
+        "11": "body_ready_custody",
+        "12": "command_fault_barrier",
+        "5": "publication",
+        "6": "attack_decision",
+        "7": "native_faction_delta",
+        "8": "death_award_credit",
+        "9": "level_ack"
+      },
+      "level_phase": {
+        "0": "requested",
+        "1": "native_applied",
+        "2": "native_observed"
+      },
+      "publication_cause": {
+        "0": "migration",
+        "1": "acquire",
+        "10": "native_refusal",
+        "2": "pre_spawn_dirty",
+        "3": "periodic",
+        "4": "credit",
+        "5": "inventory",
+        "6": "transfer_intent",
+        "7": "destination_publication",
+        "8": "clean_quiet",
+        "9": "level"
+      },
+      "reaction": {
+        "0": "not_applicable",
+        "1": "ally",
+        "2": "warmly",
+        "3": "kindly",
+        "4": "amiably",
+        "5": "indifferent",
+        "6": "apprehensive",
+        "7": "dubious",
+        "8": "threatening",
+        "9": "scowls"
+      },
+      "reserved": "Unknown enum values/flag bits rejected. Width witnesses intentionally allow the wider underlying integer type; this can only overestimate."
+    },
+    "event_kinds": {
+      "10_resolved_reaction": {
+        "boundary": "same result from real evaluator/gate, no duplicate formula or extra award calculation; reaction transitions plus each attack decision carry con",
+        "cap": 64,
+        "payload": [
+          "other_context",
+          "primary_faction",
+          "standing",
+          "actual_item_bonus",
+          "actual_spell_bonus",
+          "actual_resolved_con",
+          "hate_invisibility_feign_pet_merchant_combat_flags",
+          "hate_count"
+        ]
+      },
+      "11_body_ready_custody": {
+        "boundary": "actual entity membership/drain(!runtime_alive&&!body), readiness token binding; successful Rust intent/publication/acquire/release in causal order",
+        "cap": 384,
+        "event_f64_fields_max": 3,
+        "fixed_slots": [
+          "body_phase",
+          "transfer_u16",
+          "peer_ctx",
+          "zone_u32",
+          "flags_u32",
+          "x_or_epoch",
+          "y_or_generation",
+          "z_or_incarnation"
+        ],
+        "payload_max_fields": 8,
+        "subtypes": [
+          "BODY_REGISTERED",
+          "BODY_REMOVED",
+          "NATIVE_DRAIN_OBSERVED",
+          "READY_ACCEPTED",
+          "INTENT_DURABLE",
+          "RETIRE_REQUESTED",
+          "LEASE_ACQUIRED",
+          "LEASE_RELEASED",
+          "ACTOR_DEFEATED"
+        ]
+      },
+      "12_command_fault_barrier": {
+        "boundary": "expected killed process needs observed complete flushed prefix plus independent process-start/reap identity; unseen tail is a gap, not invented native release",
+        "cap": 128,
+        "fixed_slots": [
+          "fault_phase",
+          "case",
+          "request_u64",
+          "barrier_u16",
+          "failure_cause",
+          "related_seq_u64",
+          "last_success_revision_u64",
+          "zero_u64"
+        ],
+        "payload_max_scalars": 8,
+        "subtypes": [
+          "COMMAND_ACCEPTED",
+          "FIXTURE_PHASE",
+          "EXPECTED_FAULT_PREFIX_FLUSHED",
+          "IO_FAILURE",
+          "OVERFLOW_OR_GAP"
+        ]
+      },
+      "5_publication": {
+        "boundary": "AFTER successful atomic write/file+directory sync, actual serialized bytes hash; never report failed write as committed",
+        "cap": 2304,
+        "payload": [
+          "cause",
+          "clean",
+          "zone",
+          "level",
+          "xp_after_decimal",
+          "completed_after_decimal",
+          "transfer_token_ref",
+          "committed_native_record_sha256_hex"
+        ]
+      },
+      "6_attack_decision": {
+        "boundary": "actual serialized native authorization/denial decision and truthful HP, including incoming retaliation; all recorded nested gate entries count; no predicate polling",
+        "cap": 256,
+        "counting": "256 COMBINED all actor-involved native authorization/denial decisions, outgoing AND incoming retaliation. Every observed gate entry/attempt counts, including nested duplicate entry decisions; no hidden fanout, no dedup to evade cap, no predicate polls. Overrun stops/invalidates, not changes gameplay.",
+        "payload": [
+          "other_context",
+          "direction_0_out_1_in",
+          "allowed",
+          "actual_reaction_or0_not_applicable",
+          "denial_reason",
+          "hp_before_i64_decimal",
+          "hp_after_i64_decimal"
+        ]
+      },
+      "7_native_faction_delta": {
+        "boundary": "same native computed delta, <=5 per actual credited kill",
+        "cap": 20,
+        "payload": [
+          "award_ref",
+          "faction_id",
+          "before",
+          "after"
+        ]
+      },
+      "8_death_award_credit": {
+        "cap": 12,
+        "fixed_variants": {
+          "0": [
+            "phase",
+            "award_ref",
+            "victim_ctx",
+            "killer_ctx",
+            "zero_u64",
+            "zero_u64",
+            "zero_u64",
+            "zero_u64"
+          ],
+          "1": [
+            "phase",
+            "award_ref",
+            "victim_ctx",
+            "base_xp",
+            "scaled_xp",
+            "final_xp",
+            "next_threshold",
+            "faction_count"
+          ],
+          "2": [
+            "phase",
+            "award_ref",
+            "publication_procref",
+            "publication_seq_u64",
+            "xp_before",
+            "xp_after",
+            "completed_before",
+            "completed_after"
+          ]
+        },
+        "padding": "All zero_u64 values are string zero. Native actual level belongs to context+level events. Same native deltas refer award_ref; credit binds actual committed record revision/hash."
+      },
+      "9_level_ack": {
+        "boundary": "native level application plus later actual native/Rust acknowledgement, not saved level alone",
+        "cap": 16,
+        "payload": [
+          "request_applied_observed_phase",
+          "old_level",
+          "new_level",
+          "threshold",
+          "xp"
+        ]
+      }
+    },
+    "event_tuple": [
+      "process_index",
+      "process_local_seq",
+      "scenario_relative_us",
+      "kind",
+      "actor_context_index",
+      "actor_revision_decimal",
+      "kind_specific_payload"
+    ],
+    "fixture_selection_sha256": "cec8c281604549b7c4d54259ff7760ffe37dae26dc09e5fa4462ef2823c86871",
+    "framing": {
+      "all_required": true,
+      "context_encoded_entry_including_separator_cap": 256,
+      "context_extra_keys": false,
+      "encoded_topkey_framing_LF_cap": 2048,
+      "extra_keys": false,
+      "manifest_encoded_cap": 16384,
+      "process_encoded_entry_including_separator_cap": 512,
+      "process_fields": "existing process descriptors exact fields, role finite world/source/destination; no arbitrary argv/path/env text",
+      "snapshot_encoded_entry_including_separator_cap": 11264,
+      "string_rule": "Only fixed hashes/decimal representations, native raw snapshots and bounded manifest/summary; no free text per event",
+      "summary_encoded_cap": 4096,
+      "top_keys": [
+        "schema",
+        "contract_sha256",
+        "fixture_sha256",
+        "processes",
+        "contexts",
+        "events",
+        "snapshots",
+        "manifest",
+        "summary",
+        "complete",
+        "overflow",
+        "gaps"
+      ]
+    },
+    "installed_limits": {
+      "guest_result_line": 32768,
+      "inserver_case": 4096,
+      "ordinary_normal_artifact": 16384,
+      "outer_report": 65536
+    },
+    "maximums": {
+      "allocated_buffer_slots": 4096,
+      "arrival_metadata_refresh_saves": 48,
+      "categorized_events": 3184,
+      "combined_attack_decisions": 256,
+      "commands": 24,
+      "faction_deltas_per_kill": 5,
+      "global_item_records": 8,
+      "kills": 4,
+      "lease_acquire_plus_release": 96,
+      "live_seconds": 1440,
+      "native_body_admissions": 48,
+      "natural_boot_attempts": 12,
+      "normal_runtime_seconds": 1800,
+      "reputation_entries_per_record_upper_shape": 20,
+      "setup_cleanup_seconds": 360,
+      "transfer_intents": 6,
+      "whole_three_actor_record_snapshots": 12,
+      "zone_controller_starts": 16
+    },
+    "native_callback_constraint": "fixed in-memory buffer only; NO Rust call, file I/O, blocking, policy mutation, actor-lock observation or authority changes in callbacks; flush/export outside callback. Overflow invalidates integration result, not permissions/game state.",
+    "payload_types": {
+      "attack_decision": [
+        "ctxref",
+        "u8",
+        "bool",
+        "u8",
+        "u8",
+        "i64dec",
+        "i64dec"
+      ],
+      "body_ready_custody": [
+        "u8",
+        "u16",
+        "ctxref",
+        "u32",
+        "u32",
+        "f64_or_u64dec",
+        "f64_or_u64dec",
+        "f64_or_u64dec"
+      ],
+      "command_fault_barrier": [
+        "u8",
+        "u8",
+        "u64dec",
+        "u16",
+        "u8",
+        "u64dec",
+        "u64dec",
+        "u64dec"
+      ],
+      "death_award_credit": [
+        "u8",
+        "u16",
+        "ctx_or_procref",
+        "u64dec_or_ref",
+        "u64dec",
+        "u64dec",
+        "u64dec",
+        "u64dec_or_u8"
+      ],
+      "level_ack": [
+        "u8",
+        "u8",
+        "u8",
+        "u64dec",
+        "u64dec"
+      ],
+      "native_faction_delta": [
+        "u16",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "publication": [
+        "u8",
+        "bool",
+        "u32",
+        "u8",
+        "u64dec",
+        "u64dec",
+        "u16",
+        "sha256"
+      ],
+      "resolved_reaction": [
+        "ctxref",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "u8",
+        "u32",
+        "u32"
+      ]
+    },
+    "processes": {
+      "count": 24,
+      "fields": [
+        "index",
+        "native_pid",
+        "process_start_identity",
+        "role_world_source_destination",
+        "zone",
+        "binary_sha256",
+        "first_seq",
+        "last_seq",
+        "exit_kind",
+        "complete_prefix"
+      ],
+      "max_encoded_entry_including_separator": 512
+    },
+    "requested_integration_only": {
+      "all_failure_envelope": "Stack must prove complete guest/result/report success+failure envelopes independently before implementation",
+      "max_bytes": 851968,
+      "private_json_name": "central-cdau-integration-v1.json",
+      "summary_max_encoded_bytes": 4096,
+      "transport": "NOT_SUPPORTED_TODAY; separate fixed reviewed export required, no arbitrary path/env/command or ordinary limit widening"
+    },
+    "schema": "central-cdau-integration-v1",
+    "scope_limits": [
+      "dirty source body failure before orderly drain is NOT source transfer-publication cut",
+      "no raw stale-wire replay",
+      "no nonzero agnostic deity modifier",
+      "no nonzero scaling/evolving item claim",
+      "no broad access/migration extras",
+      "no qualification inferred from data IDs, map downloads, byte witnesses or ordinary suite"
+    ],
+    "snapshots": {
+      "A": 3,
+      "B": 5,
+      "C": 4,
+      "all_required": true,
+      "consistency": "clean stopped fixture barrier or verified stable revisions; mixed revisions invalid; no actor lock acquisition or observation",
+      "extra_keys": false,
+      "fields": [
+        "process_index",
+        "sequence",
+        "raw_record_sha256_by_actor",
+        "raw_json_by_actor"
+      ],
+      "fixed_keys": [
+        "process_index",
+        "sequence",
+        "raw_record_sha256_by_actor",
+        "raw_json_by_actor"
+      ],
+      "item_fields": "ALL23 exact native Capture/Item keys; fixed tree/IDs/custom64 safeASCII, zero scaling/evolving, full native serial/color/recast numeric ranges",
+      "max_encoded_entry_including_separator": 11264,
+      "max_encoded_snapshot_including_separator": 11264,
+      "raw_handling": "opaque byte-exact JSON strings, parse integer-aware only, preserve native number types; hashes refer to original committed record bytes",
+      "raw_json_by_actor": "exact3 opaque original native JSON strings, sumUTF8<=8192; integer-aware parser, Record6keys/Saved16keys/Item23keys all exact; no JS-number conversion",
+      "raw_record_sha256_by_actor": "exact3 sha256hex values",
+      "raw_three_record_utf8_sum_cap": 8192,
+      "scope": "EVERY snapshot is whole3actor record set, one global8item actor1 inventory, other2 native admitted empty arrays; not inventory-only"
+    },
+    "source_baseline": "ce4fbc1f53ef9d3d3adfd0bb0685189f7a14f34d",
+    "status": "DATA_CONTRACT_PROPOSAL_REQUIRES_ROOT_SCOPE_BUDGET_SELECTION; NO_IMPLEMENTATION_OR_EXECUTION",
+    "types": {
+      "ctx_or_procref": "exact variant chooses ctxref or procref",
+      "ctxref": [
+        0,
+        127
+      ],
+      "f64": {
+        "ascii_max": 32,
+        "encoded_max": 34,
+        "finite": true,
+        "roundtrip": true
+      },
+      "f64_or_u64dec": "BODY_REGISTERED last3finitef64 strings; other phases last3u64 decimal strings, unused values decimal zero",
+      "i32": [
+        -2147483648,
+        2147483647
+      ],
+      "i64dec": {
+        "ascii_max": 20,
+        "encoded_max": 22,
+        "max": "9223372036854775807",
+        "min": "-9223372036854775808",
+        "negative_zero": false
+      },
+      "nullability": "NO null/missing fields; registered sentinel context for absent body. No implicit array/string coercion.",
+      "procref": [
+        0,
+        23
+      ],
+      "sha256": {
+        "encoded_bytes": 66,
+        "regex": "[0-9a-f]{64}"
+      },
+      "u16": [
+        0,
+        65535
+      ],
+      "u32": [
+        0,
+        4294967295
+      ],
+      "u64dec": {
+        "ascii_max": 20,
+        "encoded_max": 22,
+        "max": "18446744073709551615",
+        "min": "0",
+        "regex": "0|[1-9][0-9]{0,19}"
+      },
+      "u64dec_or_ref": "exact variant chooses decimal string or bounded integer ref",
+      "u8": [
+        0,
+        255
+      ]
+    }
+  },
+  "fixture": {
+    "bytes": 1300480,
+    "sha256": "cf71b70acf549328552b3c203d2760571cb40b4d816f8aaf0ee447629039c48c"
+  },
+  "manifest": {
+    "classification": "IMMUTABLE PUBLIC FIXTURE DATA PROPOSAL, NOT ADMITTED RUNTIME OR EXECUTABLE HARNESS",
+    "files": [
+      {
+        "bytes": 8831,
+        "package_mode": "0444",
+        "path": "fixture-selection.json",
+        "sha256": "cec8c281604549b7c4d54259ff7760ffe37dae26dc09e5fa4462ef2823c86871"
+      },
+      {
+        "bytes": 1357,
+        "package_mode": "0444",
+        "path": "maps-git-object-verification.json",
+        "sha256": "f399b67a9d95669cda390eed93f4cea872d0287d4c27cd4dcef498de4164c265"
+      },
+      {
+        "bytes": 1884,
+        "package_mode": "0444",
+        "path": "maps-public-provenance.json",
+        "sha256": "4e0ac562ddb86e09444a471a318d8d9712cc68ace0af5067dfdbf590cb2009ff"
+      },
+      {
+        "bytes": 6799,
+        "package_mode": "0444",
+        "path": "maps-upstream-commit.json",
+        "sha256": "1e7549651721b5cbd250625194c63078630d5169498ec64d0c4a26498129567d"
+      },
+      {
+        "bytes": 90435,
+        "package_mode": "0444",
+        "path": "maps/base/qeytoqrg.map",
+        "sha256": "09a292cf182d37c6b0c98bda49777e84306fc9d40d788940b269cae0381ba942"
+      },
+      {
+        "bytes": 13047,
+        "package_mode": "0444",
+        "path": "maps/license.txt",
+        "sha256": "c37714c0e6238a7bbdd86d5ebb0f8d207170f37a35872928ca6d2c89fe169ecc"
+      },
+      {
+        "bytes": 824307,
+        "package_mode": "0444",
+        "path": "maps/nav/qeytoqrg.nav",
+        "sha256": "e371e9fa025445554f7d473cdd82a157b80d67999f93fd83da3f857bcffda497"
+      },
+      {
+        "bytes": 13351,
+        "package_mode": "0444",
+        "path": "maps/readme.md",
+        "sha256": "89c711416d480b19277cf45e93254ffa09d90ed790fd4571bbc8d058d975a51c"
+      },
+      {
+        "bytes": 109998,
+        "package_mode": "0444",
+        "path": "maps/water/qeytoqrg.wtr",
+        "sha256": "79adf1c74d5343b8d679f7f356e7d181b83f1531d148ab1dacbcf7e59a528662"
+      },
+      {
+        "bytes": 63075,
+        "package_mode": "0444",
+        "path": "public-items.json",
+        "sha256": "871304d90d92ff12795e1652ff873dc56d091938398b86d43d8082e831602815"
+      },
+      {
+        "bytes": 95489,
+        "package_mode": "0444",
+        "path": "public-world-rows.json",
+        "sha256": "62f40cc2df9942e809a6e3369c4ae850b0f9c671791ef9d2e5ea14ea8abcdb5e"
+      },
+      {
+        "bytes": 253,
+        "package_mode": "0444",
+        "path": "schema-faction_list.sql",
+        "sha256": "21484e1cc473025fac4bab2337353e08d229181b9a722de447e9f7ead9230c49"
+      },
+      {
+        "bytes": 359,
+        "package_mode": "0444",
+        "path": "schema-faction_list_mod.sql",
+        "sha256": "e55126ad9ee44b636c02c68d21b9708fd4b791231cc22bd61336eb3925b07f82"
+      },
+      {
+        "bytes": 12888,
+        "package_mode": "0444",
+        "path": "schema-items.sql",
+        "sha256": "a97aa2560edbb2c2f7c83fdb6a74fc65954c0c958569f55d73ee0443243cfd63"
+      },
+      {
+        "bytes": 324,
+        "package_mode": "0444",
+        "path": "schema-npc_faction.sql",
+        "sha256": "927dc36d96cac39de2da31881b6060e4ec084dc4955c74b8cff8eafbd3f5b249"
+      },
+      {
+        "bytes": 380,
+        "package_mode": "0444",
+        "path": "schema-npc_faction_entries.sql",
+        "sha256": "b5fe72fe21fa0ddfff97ac67b8a4341fb6f637660b8f8a9445408154e8127187"
+      },
+      {
+        "bytes": 6575,
+        "package_mode": "0444",
+        "path": "schema-npc_types.sql",
+        "sha256": "0904395e851ab484eb9f2e26c9ecdd1ed3ee0120a58cccfd3044dcfa4cebf473"
+      },
+      {
+        "bytes": 243,
+        "package_mode": "0444",
+        "path": "schema-rule_sets.sql",
+        "sha256": "c42756c998178970127ddbb71e14df2f999b6488c971fbbb3f7bcfb5e95fc721"
+      },
+      {
+        "bytes": 343,
+        "package_mode": "0444",
+        "path": "schema-rule_values.sql",
+        "sha256": "3074ef2a2c24f642a4978950e365e5a29f9a8bbed5a561a73fd4ef5214e165f4"
+      },
+      {
+        "bytes": 1113,
+        "package_mode": "0444",
+        "path": "schema-spawn2.sql",
+        "sha256": "e32eb6c5f52a8c36afcc89fb400b8d05205b20590f07d0fe8a7562ac58f57189"
+      },
+      {
+        "bytes": 704,
+        "package_mode": "0444",
+        "path": "schema-spawnentry.sql",
+        "sha256": "70165251e26af5a9424d024dc8fba6c8b1aa8a18b313c1c1bde65ef5f589603c"
+      },
+      {
+        "bytes": 709,
+        "package_mode": "0444",
+        "path": "schema-spawngroup.sql",
+        "sha256": "73390848df432aaa9dcf51eade58daf7acc0e8cf362e90d4dc88b8447eca2cb4"
+      },
+      {
+        "bytes": 4910,
+        "package_mode": "0444",
+        "path": "schema-zone.sql",
+        "sha256": "aea5b5a9cc538d24d40eedcf5ce861ab7a8f382bd3c50fbc73bdb1d835fdff8d"
+      },
+      {
+        "bytes": 1300,
+        "package_mode": "0444",
+        "path": "schema-zone_points.sql",
+        "sha256": "8f3b93e668e79768663e93df22f3422c3f302401bf52c9fea1d8a301a52cb690"
+      },
+      {
+        "bytes": 812,
+        "package_mode": "0444",
+        "path": "static-data-consistency.json",
+        "sha256": "c8c19de7ce7c99e4b2889aa32cbded4bd8318824809782f833ff3a3fcd791c88"
+      },
+      {
+        "bytes": 9087,
+        "package_mode": "0444",
+        "path": "xp-rule-selection.json",
+        "sha256": "c7e7e927397a6428f7135d5b9c2b0068271494a2166de07c9e7937d793ab3894"
+      }
+    ],
+    "map_source": "https://github.com/EQEmu/maps/tree/e8efa8ed4f4ea4c434c03c40d2a758388a54f4d6",
+    "native_and_source_gates": "Data download/static scalar compatibility are not native item admission, geometry/loaded route qualification or runtime success. ce4 remote-hint schema blocker retained, separately routed Server repair must be in final reviewed source.",
+    "preserved_runtime_iso_sha256": "b1128187a1b39dc9d38b981160248ed45bdc854efa559b549b047dda5e981ed4",
+    "schema": 1,
+    "source_server": "ce4fbc1f53ef9d3d3adfd0bb0685189f7a14f34d"
+  },
+  "manifest_sha256": "bc266220eba8cf0685463856221ed2a71d035ec1c5607c73e2058d1376df8797",
+  "schema": 1,
+  "selection": "central-cdau-integration-v1"
+}

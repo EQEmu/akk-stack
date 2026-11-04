@@ -33,7 +33,16 @@ def main():
     parser.add_argument('--profile-output', type=Path, help='Fresh private directory for bounded separate raw artifacts')
     parser.add_argument('--profiler-input', type=Path, help='Optional pinned offline profiler-package tar')
     parser.add_argument('--profiler-input-sha256', help='Exact SHA256 of reviewed profiler-package tar')
+    parser.add_argument('--integration', choices=('central-cdau-integration-v1',))
+    parser.add_argument('--integration-input', type=Path)
+    parser.add_argument('--integration-output', type=Path)
     args = parser.parse_args()
+    if args.integration:
+        if (args.profile or args.profiling or args.export_profile or args.world_control or args.identity
+                or args.integration_input is None or (not args.prepare_only and args.integration_output is None)):
+            parser.error('Integration requires ordinary full build, exact input and new private output')
+    elif args.integration_input or args.integration_output:
+        parser.error('Integration operands require fixed integration selection')
     if args.profile and (args.profiling or args.export_profile or args.profiler_input or args.profiler_input_sha256):
         parser.error('Sanitizers and profiling are mutually exclusive')
     if args.identity and args.profiling: parser.error('--identity does not select profiling modes')
@@ -72,12 +81,12 @@ def main():
             request = prepare(args.repo, args.commit, args.websocketpp or args.repo / 'submodules/websocketpp',
                               args.input_store / 'build-inputs-20260925-v3/build-inputs.iso', args.rust_input, output, runtime_input,
                               args.world_control, profiling=args.profiling, profiler_input=args.profiler_input,
-                              profiler_sha256=args.profiler_input_sha256, diagnostic_profile=args.profile)
+                              profiler_sha256=args.profiler_input_sha256, diagnostic_profile=args.profile, integration=args.integration, integration_input=args.integration_input)
             if args.prepare_only:
                 # Preparation success is explicitly not an execution pass.
                 print(json.dumps(dict(scope='prepared-input-only', executed=False, request=request)))
                 return 0
-            report = exchange(config['socket'], request, output, profile_output=args.profile_output) if args.profiling else exchange(config['socket'], request, output)
+            report = exchange(config['socket'], request, output, integration_output=args.integration_output) if args.integration else exchange(config['socket'], request, output, profile_output=args.profile_output) if args.profiling else exchange(config['socket'], request, output)
             directory = os.environ.get('VALIDATION_AFK_EVIDENCE_DIR')
             if report.get('exit_code') in (0, 1, 2) and report.get('guest', {}).get('normal_world'):
                 directory = directory or Path.home()/'.local/state/eqemu-rust-validator/runs'/report['run_id']

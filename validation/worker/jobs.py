@@ -402,6 +402,9 @@ def main(argv=None):
     launch.add_argument('--notify-adapter', type=Path, default=ROOT / 'scripts/t3-validation-notify')
     launch.add_argument('--websocketpp', type=Path, required=True)
     launch.add_argument('--rust-input', type=Path, help='Finite source-pinned full-build Rust bundle; original default if omitted')
+    launch.add_argument('--integration', choices=('central-cdau-integration-v1',))
+    launch.add_argument('--integration-input', type=Path)
+    launch.add_argument('--integration-output', type=Path)
     launch.add_argument('--config', type=Path, default=Path('/etc/eqemu-validator/config.json'))
     for name in ('status', 'cancel', 'retry-notification'):
         sub.add_parser(name).add_argument('job_id')
@@ -424,6 +427,13 @@ def main(argv=None):
                 head = view.location('HEAD')
             command = [str(ROOT / 'scripts/validate-worker-candidate'), '--repo', str(args.repo.resolve()),
                 '--commit', args.commit, '--websocketpp', str(args.websocketpp.resolve()), '--config', str(args.config.resolve())]
+            if args.integration:
+                if args.profile != 'full' or args.integration_input is None or args.integration_output is None:
+                    raise ValueError('Fixed integration requires full, exact input and fresh private output')
+                command += ['--integration', args.integration, '--integration-input', str(args.integration_input.absolute()),
+                            '--integration-output', str(args.integration_output.absolute())]
+            elif args.integration_input or args.integration_output:
+                raise ValueError('Integration operands require fixed selection')
             if args.rust_input is not None:
                 command += ['--rust-input', str(args.rust_input.resolve())]
             if args.profile == 'full-sanitizers':

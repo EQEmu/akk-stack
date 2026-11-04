@@ -9,7 +9,7 @@ POLICY_ROOT = Path('/etc')
 
 # Bind separate source copies, including conservative transitive local imports.
 # Historical installed inventories below remain independent.
-FRONTEND_FILES = ('validation/worker/sanitizers.py', 'validation/worker/profile_contract.py', 'validation/worker/profiling.py', 'validation/worker/profile_artifacts.py',
+FRONTEND_FILES = ('validation/worker/actor_integration.py', 'validation/worker/integration_artifacts.py', 'validation/actor-integration-fixture.json', 'validation/worker/sanitizers.py', 'validation/worker/profile_contract.py', 'validation/worker/profiling.py', 'validation/worker/profile_artifacts.py',
                 'validation/worker/profile_inputs.py', 'scripts/validate-worker-candidate', 'validation/worker/identity.py',
                 'validation/worker/prepare.py', 'validation/worker/client.py',
                 'validation/inputs.py', 'validation/profile.json', 'validation/runtime-fixture.json',

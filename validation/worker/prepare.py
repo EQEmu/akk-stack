@@ -47,14 +47,26 @@ def copy_verified(path, target, expected):
     target.chmod(0o400)
 
 
-def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world_control=None, *, diagnostic_profile=None, profiling=None, profiler_input=None, profiler_sha256=None):
+def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world_control=None, *, diagnostic_profile=None, profiling=None, profiler_input=None, profiler_sha256=None, integration=None, integration_input=None):
     """Select a complete clean commit, without freezing Cargo manifests or test counts."""
     if profiling is not None and diagnostic_profile is not None:
         raise ValueError('Sanitizers and profiling are mutually exclusive')
     if profiling is not None:
         from profiling import MODES
         if profiling not in MODES: raise ValueError('Unknown profiling mode')
+    if integration is not None:
+        from actor_integration import verify_fixture
+        from integration_artifacts import SELECTION
+        if integration != SELECTION or integration_input is None or profiling or diagnostic_profile or world_control:
+            raise ValueError('Fixed integration requires ordinary full lifecycle and exact fixture input')
+        verify_fixture(integration_input)
+    elif integration_input is not None:
+        raise ValueError('Integration input requires fixed selection')
     approved = {}
+    if integration is not None:
+        from actor_integration import FIXTURE_BYTES
+        from integration_artifacts import FIXTURE_SHA
+        approved['integration-fixture.tar'] = {'bytes': FIXTURE_BYTES, 'sha256': FIXTURE_SHA}
     if profiler_input is not None:
         from profile_inputs import manifest
         approved['profilers.tar'] = record(profiler_input)
@@ -104,6 +116,7 @@ def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world
         inputs.verify_archive(dep_archive, dep_entries, dep_links)
         originals = {'native.iso': Path(native).absolute(), 'rust-inputs.tar': Path(rust).absolute(),
                      'runtime.iso': Path(runtime).absolute()}
+        if integration is not None: originals['integration-fixture.tar'] = Path(integration_input).absolute()
         if profiler_input is not None: originals['profilers.tar'] = Path(profiler_input).absolute()
         staged = root/'pinned'; staged.mkdir()
         files = {'eqemu.tar': archive, 'websocketpp.tar': dep_archive}
@@ -114,6 +127,7 @@ def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world
         identity = {'version': 1, 'candidate': commit, 'tree': tree,
                     'files': {'eqemu.tar': record(archive), 'websocketpp.tar': record(dep_archive), **approved},
                     'world_control': world_control}
+        if integration is not None: identity['integration'] = integration
         if profiling is not None: identity['profiling']=profiling
         if diagnostic_profile is not None: identity['diagnostic_profile'] = diagnostic_profile
         # Repeat after archiving: dirty index/worktree changes must not silently disappear.
@@ -134,6 +148,7 @@ def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world
                 raise ValueError('Offline input changed while packaging')
             request = dict(version=1, operation='build', candidate=commit, tree=tree, **payload)
             if diagnostic_profile is not None: request['diagnostic_profile'] = diagnostic_profile
+            if integration is not None: request['integration'] = integration
             if profiling is not None: request['profiling'] = profiling
             return request
         except BaseException:

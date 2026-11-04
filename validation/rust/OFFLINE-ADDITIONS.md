@@ -90,3 +90,7 @@ reviews must cover the combined successor. The parent owns two independent final
 reviews, root decision,
 admission and the sole ordinary launch. Recheck the final source lock if the
 selected Server changes. Existing runtime routes, staging and bundles stay intact.
+
+R1 source findings and the sequential frontend-closure/input-capture fixes are
+documented in [OFFLINE-R1-FIXES.md](OFFLINE-R1-FIXES.md). That follow-up preserves
+the original sealed package and records new evidence separately.

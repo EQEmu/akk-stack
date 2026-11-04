@@ -1,0 +1,161 @@
+{
+  "version": 1,
+  "reviewed_r1_pin": "9ea0036a2e9e9091aedcc15633ae4eed83b32c82",
+  "review_base_master": "0a368d913d9bec556f1c41ac2cf39b37ec908c3c",
+  "master_tree_identical_to": "f9fba37f1122f5c0b805a05af3607e8cda0f1ce1",
+  "sequential_fixes": [
+    "79c7df1869fc382252a93694b5bf7273b751ee81",
+    "2a8860e8dc875f565f9ecce7d9ab00130a90e883"
+  ],
+  "tested_code_head": "2a8860e8dc875f565f9ecce7d9ab00130a90e883",
+  "source_files_sha256": {
+    "scripts/validate-worker-candidate": "f41d5a3f6006692a56e52c6f1ce2b0b6810d29c2b61a544ec286d05b120c7e6d",
+    "scripts/validation-job": "e04f6c77bddcd196f94e3e4b85bd840f783c204191fc6b050438ebbd0325bd5a",
+    "tests/worker/test_identity.py": "d44818e207a4615a0aa0947fc4b6222d4e2c77ebdab30dd123376158963a265f",
+    "tests/worker/test_jobs.py": "c2c3e0ef668a4334bfab35cdc978d166be3db12689cbd56dabedf82d3314f820",
+    "tests/worker/test_prepare_inputs.py": "e9e5e2e6b75ca978a465f048d83edb7b3733c5b11a3f7aa066f1617bb58812f6",
+    "validation/actor.py": "c647fe5abd7391be7668bdf3caac2af1270dd8c14e70ea2888fd76ac17ba83cd",
+    "validation/actor_runtime.py": "b2f7fc66fb9f8ebbba6ea6217900e00f53d5ffe1f6b23f08bfa75abfde0e3235",
+    "validation/debugger.py": "f3994febc3bdd20126e20c340fd83a8ad4de347ba5038d590f80984bb2e2ca80",
+    "validation/inputs.py": "69badc1109dfc989fc57510a93319cb0881d1bca972ab85cb63102a59ddcb337",
+    "validation/profile.json": "99e26a21ad4fadb1f68ac88240b925d3a65629124b8eae115edb80422c0d9a95",
+    "validation/runtime-fixture.json": "16ca34a8ccf961a76bed03f19bb6127a05a91d95e625be8971e826e8d436e9c2",
+    "validation/rust.py": "82508c64ae8ac968a44b3eee4fd245afd048ea0eaba9113ded1767e44ca66494",
+    "validation/rust/extend_offline.py": "429d88bf9caed5e15f56ae8f094aab0bb1e8ae3d1a8b537872cc6bfaf95cbdc0",
+    "validation/rust/offline-additions.json": "77771e98e4cef9cdf99c2e2a4b19d8577a38785087691c1b2c43654901d62387",
+    "validation/rust/offline-additions.lock": "a5f3dd2f0ff9e407b12d1ca1d8e0dde5d48e4c20cac34c025fe483daa2149fed",
+    "validation/worker/build_guest.py": "d083aa03b2929a19dfc20de7d37b0798fdf0528663383018c2bb6b0fac6aa282",
+    "validation/worker/client.py": "75d9f82399ac6d836e93a719c1af9a3b771fbb78aaa899ad147a3548c28d9126",
+    "validation/worker/guest.py": "54c1ddf434bb031890c77d89388c56f18d4abd10bb0fe5e7ee69b6d7af52a418",
+    "validation/worker/identity.py": "d9733d5e10db473dadbe4deeb3bc5c78ad0f17e5e0eccc35d59a9b2de4bebbf7",
+    "validation/worker/jobs.py": "5d2aa4a1950b6305019f3be401ebdd8272b70af90973db5565862e19c0b69012",
+    "validation/worker/normal_world.py": "0be9093ead644fc64f0b25bd3db22e8ed8ecab74297a8e4d64fa41213c73c0e7",
+    "validation/worker/prepare.py": "d8f65bef5215b761d19db475d54e3f82a4f647f2bcc5b7e00bbc8fe64daaa5f0",
+    "validation/worker/profile_artifacts.py": "38ff2719ae98d4607bd431b2820b90c74ca18998bcd1f7b9b701b9040dcc1eb4",
+    "validation/worker/profile_contract.py": "f0a09f809a8ec8784b2f78cf22b2f76daddda32c57dd01063c992abd2f54db0d",
+    "validation/worker/profile_inputs.py": "aa9d18e3cda3aae1225db548e5c1fa8e9096c3e8f23f55e1670fa77872c6593c",
+    "validation/worker/profiling.py": "9bcd0d4f3700348fa0e86a69ca2dceafbb963e53d922a0d0329f03ad3c20b64a",
+    "validation/worker/quick_guest.py": "ace14babb9c3b6224c5f3382744b6de420aa7542ea4574f1977e38d9f7f38208",
+    "validation/worker/quick_snapshot.py": "322a6ed5492cc00d685e38bf627ffc9a4a7ce176b2d040079cc48b75133f3df5",
+    "validation/worker/runtime.py": "e767920eb6e369e9c09f6477c336bace62dce68ddeaefd77b129a00819103f76",
+    "validation/worker/sanitizers.py": "97ad61a1f3d5abe82eca470c5f5a469eef45059327dbb71014f63f7b5b23596b",
+    "validation/worker/snapshot.py": "a577645d2c71cd7e96bd9a53e953fb1e094d3be3ea3630b5c3e3f2dc77f5f4cc"
+  },
+  "frontend_files": [
+    "validation/worker/sanitizers.py",
+    "validation/worker/profile_contract.py",
+    "validation/worker/profiling.py",
+    "validation/worker/profile_artifacts.py",
+    "validation/worker/profile_inputs.py",
+    "scripts/validate-worker-candidate",
+    "validation/worker/identity.py",
+    "validation/worker/prepare.py",
+    "validation/worker/client.py",
+    "validation/inputs.py",
+    "validation/profile.json",
+    "validation/runtime-fixture.json",
+    "validation/worker/normal_world.py",
+    "validation/worker/snapshot.py",
+    "validation/worker/runtime.py",
+    "validation/worker/guest.py",
+    "validation/worker/quick_guest.py",
+    "validation/worker/quick_snapshot.py",
+    "validation/worker/build_guest.py",
+    "validation/actor.py",
+    "validation/actor_runtime.py",
+    "validation/debugger.py",
+    "validation/rust.py"
+  ],
+  "installed_inventory_unchanged": true,
+  "pins": {
+    "native": "02e94c23126772a5ca81ac7974661c3010cbdbba8da7647b8ac6cedac6c3cca4",
+    "rust_original": "2a0b4a32ad74b3bb49195d43f76ece75166b500004f5b32f868cb20a292bc52f",
+    "rust_additional": {
+      "7bc2a72f9b8a3ebcea3dfcb879ab2d5bb0a23d5ab4913e85f9acd728a5ce932e": 171284480
+    }
+  },
+  "sealed_package": {
+    "path": "/home/bump/.local/state/eqemu-rust-validator/additive-packages-final/7bc2a72f9b8a3ebcea3dfcb879ab2d5bb0a23d5ab4913e85f9acd728a5ce932e",
+    "all_16_files_checksums_valid": true,
+    "files": {
+      "Cargo.lock": "a5f3dd2f0ff9e407b12d1ca1d8e0dde5d48e4c20cac34c025fe483daa2149fed",
+      "crates/itoa-1.0.18.crate": "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682",
+      "crates/memchr-2.8.3.crate": "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98",
+      "crates/ryu-1.0.23.crate": "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f",
+      "crates/serde_json-1.0.145.crate": "402a6f66d8c709116cf22f558eab210f5a50187f702eb4d7e5ef38d9a7f1c79c",
+      "evidence/RETAINED-ACTOR-CRATES-VERIFIED.json": "ed789edab1e16a85ce729b66ecf7945851e5a43267d29524e789b0df3dd7fc32",
+      "evidence/SERVER-FINAL-SOURCE-BINDING-d58d1fa4.json": "0d87c98e4ea594594b8d2d5e661953c70abb60a3fb74a53ba49b95cc35f2ecbe",
+      "evidence/download-comparison.json": "5fe5fa78a633bfb84afd31fbe411de18241d4fa70189032343d9870031e64dd0",
+      "evidence/release-provenance.json": "f7e0add8bd6ccf46cfe66bd2e7723998b9e780cd6d96b0b94f38e1db212ab877",
+      "evidence/retained-four-crates.json": "fca9c5aeb9e90a4c5c77ee96a88130b507e377171b995404f444b2c995cc3187",
+      "evidence/runtime-interface.json": "c8b062b40ddf348dc9bcf04e4bc008a280fd5fa500be0d61be2a5749c824c79e",
+      "extend_offline.py": "429d88bf9caed5e15f56ae8f094aab0bb1e8ae3d1a8b537872cc6bfaf95cbdc0",
+      "manifest.json": "45fcd8b4e46b483be55150f9b9925e73c3c3889435458c35e78e8ed2ee8f1a16",
+      "offline-additions.json": "77771e98e4cef9cdf99c2e2a4b19d8577a38785087691c1b2c43654901d62387",
+      "rust-inputs.tar": "7bc2a72f9b8a3ebcea3dfcb879ab2d5bb0a23d5ab4913e85f9acd728a5ce932e",
+      "SHA256SUMS": "596fc857096ee570b35bdc9aabbbc6a8e53c77f5f04db1664ea428a2347d4f8b"
+    },
+    "written": false
+  },
+  "server": {
+    "commit": "d58d1fa4cb5ce656984d6ebaaeb78c8b70b06c85",
+    "tree": "c10c6c9b2c44e46faf4eb44465cd349352877893",
+    "lock_sha256": "a5f3dd2f0ff9e407b12d1ca1d8e0dde5d48e4c20cac34c025fe483daa2149fed",
+    "candidate_execution": false
+  },
+  "tests": {
+    "identity": 9,
+    "jobs": 12,
+    "input_capture": 5,
+    "build": 14,
+    "offline": 8,
+    "full_worker": 297,
+    "full_validation": 153,
+    "unexpected_skips": 0
+  },
+  "logs": {
+    "identity-reproduction.log": {
+      "path": "/home/bump/.t3/worktrees/bump-akk-stack/t3-78397cf0/data/offline-r1-fixes/identity-reproduction.log",
+      "sha256": "dbe3f5321704c55215cd6b9d00901363cceac7a0586dee93f903e13d0bd36aa2"
+    },
+    "input-reproduction.log": {
+      "path": "/home/bump/.t3/worktrees/bump-akk-stack/t3-78397cf0/data/offline-r1-fixes/input-reproduction.log",
+      "sha256": "99a96c3e3c189169031efa8b402d1871133d471f1d27868ecc3abac42d57a3dd"
+    },
+    "identity-after.log": {
+      "path": "/home/bump/.t3/worktrees/bump-akk-stack/t3-78397cf0/data/offline-r1-fixes/identity-after.log",
+      "sha256": "f3befa9095023e4d2a460f819a87950dfa2d3d6ca0ff4edcf9eb76e035662673"
+    },
+    "jobs-snapshot.log": {
+      "path": "/home/bump/.t3/worktrees/bump-akk-stack/t3-78397cf0/data/offline-r1-fixes/jobs-snapshot.log",
+      "sha256": "4d6d27a94d138ce6faf37580281613cfcfca296c96e942e13600a20edbc9602e"
+    },
+    "input-final.log": {
+      "path": "/home/bump/.t3/worktrees/bump-akk-stack/t3-78397cf0/data/offline-r1-fixes/input-final.log",
+      "sha256": "af61378dcb22a8ab4fd6dbf7c94b619bba190aa295faef3274e08e907ece31f6"
+    },
+    "build-after.log": {
+      "path": "/home/bump/.t3/worktrees/bump-akk-stack/t3-78397cf0/data/offline-r1-fixes/build-after.log",
+      "sha256": "ee12e56bcfaa304faa081126c58d373baefe4f1a1c9f673df07befc0d59857c8"
+    },
+    "worker-final.log": {
+      "path": "/home/bump/.t3/worktrees/bump-akk-stack/t3-78397cf0/data/offline-r1-fixes/worker-final.log",
+      "sha256": "90fea43d297b888647775f0ffd200f85751b40c9acc239dfb41fe24cbac24dc5"
+    },
+    "validation-final.log": {
+      "path": "/home/bump/.t3/worktrees/bump-akk-stack/t3-78397cf0/data/offline-r1-fixes/validation-final.log",
+      "sha256": "cbe0523d2c5e9627e9c9f6bbd23624b4006a4a613bdcd0c05f4dad483e355633"
+    },
+    "offline-final.log": {
+      "path": "/home/bump/.t3/worktrees/bump-akk-stack/t3-78397cf0/data/offline-r1-fixes/offline-final.log",
+      "sha256": "df92f003ec27efdf04a45efcc3e9b45dfb30c73cded5a64954e610e09cbcd9e5"
+    },
+    "review-r1-comments.json": {
+      "path": "/home/bump/.t3/worktrees/bump-akk-stack/t3-78397cf0/data/offline-r1-fixes/review-r1-comments.json",
+      "sha256": "844240293b87f7a06b4d9d30c0f8b39b534a82b7499eaa9b01ecf225126d07d0"
+    }
+  },
+  "fresh_two_complete_reviews_pending": true,
+  "root_selection_pending": true,
+  "installed_mutation": false
+}

@@ -415,7 +415,8 @@ def main(argv=None):
             if not args.t3_base_dir.is_absolute() or not args.t3_base_dir.is_dir():
                 raise ValueError('Expected explicit existing T3 data directory')
             # GitTree reads objects without candidate hooks/config or code execution.
-            sys.path.insert(0, str(ROOT / 'validation'))
+            # Keep worker helpers first: validation also contains prepare.py.
+            sys.path.append(str(ROOT / 'validation'))
             from inputs import GitTree
             with tempfile.TemporaryDirectory() as temporary:
                 view = GitTree(args.repo, Path(temporary))

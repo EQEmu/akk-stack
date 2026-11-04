@@ -7,6 +7,18 @@ from prepare import record
 
 POLICY_ROOT = Path('/etc')
 
+# Bind separate source copies, including conservative transitive local imports.
+# Historical installed inventories below remain independent.
+FRONTEND_FILES = ('validation/worker/sanitizers.py', 'validation/worker/profile_contract.py', 'validation/worker/profiling.py', 'validation/worker/profile_artifacts.py',
+                'validation/worker/profile_inputs.py', 'scripts/validate-worker-candidate', 'validation/worker/identity.py',
+                'validation/worker/prepare.py', 'validation/worker/client.py',
+                'validation/inputs.py', 'validation/profile.json', 'validation/runtime-fixture.json',
+                'validation/worker/normal_world.py',
+                'validation/worker/snapshot.py', 'validation/worker/runtime.py', 'validation/worker/guest.py',
+                'validation/worker/quick_guest.py', 'validation/worker/quick_snapshot.py',
+                'validation/worker/build_guest.py', 'validation/actor.py', 'validation/actor_runtime.py',
+                'validation/debugger.py', 'validation/rust.py')
+
 
 # Exact runtime bytes identify the retained master/v1/v2/v3 implementations.
 # These select an identity inventory only, never runtime admission or execution.
@@ -49,13 +61,8 @@ def identity(root, config_path, native, rust, runtime=None):
     config = json.loads(config_path.read_text())
     from sanitizers import policy_name
     policy = 'eqemu-validator-profiling' if config.get('selection')=='profiling-v1' else policy_name(config)
-    frontend = ('validation/worker/sanitizers.py', 'validation/worker/profile_contract.py', 'validation/worker/profiling.py', 'validation/worker/profile_artifacts.py',
-                'validation/worker/profile_inputs.py', 'scripts/validate-worker-candidate', 'validation/worker/identity.py',
-                'validation/worker/prepare.py', 'validation/worker/client.py',
-                'validation/inputs.py', 'validation/profile.json', 'validation/runtime-fixture.json',
-                'validation/worker/normal_world.py')
     worker = installed_files(config, policy)
-    files = [*(root / name for name in frontend),
+    files = [*(root / name for name in FRONTEND_FILES),
              *(Path(config['code_dir']) / name for name in worker), config_path,
              POLICY_ROOT / 'systemd/system' / (policy + '@.service'),
              POLICY_ROOT / 'systemd/system' / (policy + '.socket'),

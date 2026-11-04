@@ -1,0 +1,42 @@
+{
+  "source_commit": "d58d1fa4cb5ce656984d6ebaaeb78c8b70b06c85",
+  "source_tree": "c10c6c9b2c44e46faf4eb44465cd349352877893",
+  "lock_sha256": "a5f3dd2f0ff9e407b12d1ca1d8e0dde5d48e4c20cac34c025fe483daa2149fed",
+  "first": {
+    "path": "/home/bump/.local/state/eqemu-rust-validator/additive-packages-final/7bc2a72f9b8a3ebcea3dfcb879ab2d5bb0a23d5ab4913e85f9acd728a5ce932e",
+    "bundle": {
+      "bytes": 171284480,
+      "sha256": "7bc2a72f9b8a3ebcea3dfcb879ab2d5bb0a23d5ab4913e85f9acd728a5ce932e"
+    },
+    "manifest_sha256": "45fcd8b4e46b483be55150f9b9925e73c3c3889435458c35e78e8ed2ee8f1a16"
+  },
+  "independent": {
+    "path": "/home/bump/.local/state/eqemu-rust-validator/additive-packages-independent-rebuild/7bc2a72f9b8a3ebcea3dfcb879ab2d5bb0a23d5ab4913e85f9acd728a5ce932e",
+    "bundle": {
+      "bytes": 171284480,
+      "sha256": "7bc2a72f9b8a3ebcea3dfcb879ab2d5bb0a23d5ab4913e85f9acd728a5ce932e"
+    },
+    "manifest_sha256": "45fcd8b4e46b483be55150f9b9925e73c3c3889435458c35e78e8ed2ee8f1a16"
+  },
+  "all_package_files_byte_identical": 16,
+  "tool_sha256": "429d88bf9caed5e15f56ae8f094aab0bb1e8ae3d1a8b537872cc6bfaf95cbdc0",
+  "independent_tarfile_verifier": {
+    "sha256sums_valid": true,
+    "original_members_preserved": 2264,
+    "added_members": 203,
+    "added_roots": [
+      "itoa-1.0.18",
+      "memchr-2.8.3",
+      "ryu-1.0.23",
+      "serde_json-1.0.145"
+    ]
+  },
+  "tests": {
+    "worker": "284 run, 283 passed, 1 retained-data test skipped; focused run executes that test",
+    "validation": "153 passed",
+    "focused": "7 passed including retained-data independent rebuild"
+  },
+  "test_logs": "/home/bump/.local/state/eqemu-rust-validator/additive-verification",
+  "candidate_execution": false,
+  "admission": false
+}

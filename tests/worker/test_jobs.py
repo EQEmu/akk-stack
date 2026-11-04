@@ -62,6 +62,20 @@ class Jobs(unittest.TestCase):
             time.sleep(.03)
         self.fail('Job did not finish: ' + repr(jobs.status(path)) + (path / 'runner.log').read_text())
 
+    def test_snapshot_contains_complete_frontend_import_closure(self):
+        from identity import FRONTEND_FILES
+        value = jobs.start(self.root/'jobs', dict(
+            command=[str(ROOT/'scripts/validate-worker-candidate'), '--help'],
+            candidate='a'*40, profile='trusted-process-fixture', adapter=str(self.adapter),
+            thread='explicit-thread', t3_base_dir=str(self.root)), snapshot=True)
+        path = jobs.job_path(self.root/'jobs', value['job_id']); self.paths.append(path)
+        result = self.wait(path)
+        self.assertEqual(result['result']['returncode'],0)
+        records = jobs.read(path/'job.json')['client_files_sha256']
+        self.assertLessEqual(set(FRONTEND_FILES),set(records))
+        for name in FRONTEND_FILES:
+            self.assertEqual((path/'client'/name).read_bytes(),(ROOT/name).read_bytes())
+
     def test_success_late_failure_and_launch_failure(self):
         for code in (0, 1, 7):
             path = self.start('import json,sys\nprint(json.dumps(dict(passed=True,cleanup_complete=True)))\n'

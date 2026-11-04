@@ -151,12 +151,12 @@ def start(root, spec, snapshot=False):
     path = root / job_id; path.mkdir(mode=0o700)
     if snapshot:
         # Freeze the small trusted frontend closure, never the candidate's code.
-        files = ['scripts/validate-worker-candidate', 'validation/inputs.py',
-                 'validation/profile.json', 'validation/runtime-fixture.json']
+        from identity import FRONTEND_FILES
+        files = list(FRONTEND_FILES)
         files += [str(p.relative_to(ROOT)) for p in sorted((ROOT / 'validation/worker').glob('*.py'))
                   if p.name != 'jobs.py']
         records = {}
-        for name in files:
+        for name in dict.fromkeys(files):
             target = path / 'client' / name; target.parent.mkdir(parents=True, exist_ok=True)
             data = (ROOT / name).read_bytes(); target.write_bytes(data)
             target.chmod(0o700 if name.startswith('scripts/') else 0o600)

@@ -1,4 +1,5 @@
 """Real-file identities for separate frontend, retained and new installed closures."""
+import ast
 import contextlib
 import functools
 import hashlib
@@ -84,6 +85,40 @@ class Identity(unittest.TestCase):
                     path.write_bytes(raw)
             (fixture.root/'candidate').write_bytes(b'unrelated candidate')
             self.assertEqual(original, fixture.calculate())
+
+    def test_every_frontend_import_copy_binds_mutation_and_missing_file(self):
+        for slot in (*PINS, 'new'):
+            with self.subTest(slot=slot), identity_fixture(slot) as fixture:
+                original = fixture.calculate()
+                installed = {name:(fixture.installed/name).read_bytes() for name in fixture.helpers}
+                for name in identity.FRONTEND_FILES:
+                    path = fixture.frontend/name; raw = path.read_bytes()
+                    with self.subTest(frontend=name):
+                        path.write_bytes(raw+b'\n')
+                        self.assertNotEqual(original, fixture.calculate())
+                        path.unlink()
+                        with self.assertRaises(FileNotFoundError): fixture.calculate()
+                        path.write_bytes(raw)
+                self.assertEqual(installed,{name:(fixture.installed/name).read_bytes() for name in fixture.helpers})
+                self.assertEqual(original,fixture.calculate())
+
+    def test_frontend_list_covers_transitive_local_imports(self):
+        # Conservative: include imports in every function, even worker-only branches.
+        pending = [ROOT/'scripts/validate-worker-candidate']; visited = set()
+        while pending:
+            path = pending.pop()
+            if path in visited: continue
+            visited.add(path)
+            for node in ast.walk(ast.parse(path.read_text())):
+                names = ([node.module] if isinstance(node,ast.ImportFrom) else
+                         [item.name for item in node.names] if isinstance(node,ast.Import) else [])
+                for module in names:
+                    if not module: continue
+                    for directory in (ROOT/'validation/worker', ROOT/'validation'):
+                        imported = directory/(module.replace('.', '/')+'.py')
+                        if imported.is_file():
+                            pending.append(imported); break
+        self.assertLessEqual({str(path.relative_to(ROOT)) for path in visited},set(identity.FRONTEND_FILES))
 
     def test_policy_files_bind_exact_ordinary_legacy_v1_and_explicit_slots(self):
         for slot in PINS:

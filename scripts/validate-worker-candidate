@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'validation/worker'
 from client import CONFIG, exchange
 from prepare import prepare
 from identity import identity
-from normal_world import export_evidence
+from normal_world import EvidenceBudgetError, export_evidence
 
 
 def main():
@@ -25,12 +25,34 @@ def main():
     parser.add_argument('--runtime-input', type=Path, help='Pinned public runtime ISO (default: declared path under input-store)')
     parser.add_argument('--world-control', choices=('startup', 'assertion', 'cancel'), help='Fixed non-passing normal-world qualification control')
     parser.add_argument('--config', type=Path, default=CONFIG)
+    parser.add_argument('--profile', choices=('asan-ubsan-native-v1',), help='Requires separately admitted diagnostic worker')
     parser.add_argument('--prepare-only', type=Path, metavar='OUTPUT_ISO')
     parser.add_argument('--identity', action='store_true', help='Print AFK contract identity without connecting to the worker or running candidate code')
+    parser.add_argument('--export-profile', help='Read-only export of the exact last retained profiling run ID; starts no VM')
+    parser.add_argument('--profiling', choices=('timeline','heaptrack','perf'), help='Opt-in independent profiling of the fixed normal-world workload')
+    parser.add_argument('--profile-output', type=Path, help='Fresh private directory for bounded separate raw artifacts')
+    parser.add_argument('--profiler-input', type=Path, help='Optional pinned offline profiler-package tar')
+    parser.add_argument('--profiler-input-sha256', help='Exact SHA256 of reviewed profiler-package tar')
     args = parser.parse_args()
+    if args.profile and (args.profiling or args.export_profile or args.profiler_input or args.profiler_input_sha256):
+        parser.error('Sanitizers and profiling are mutually exclusive')
+    if args.identity and args.profiling: parser.error('--identity does not select profiling modes')
+    if args.profiling and not (args.prepare_only or args.profile_output):
+        parser.error('--profiling requires --profile-output or --prepare-only')
+    if not args.profiling and (args.profile_output and not args.export_profile or args.profiler_input or args.profiler_input_sha256):
+        parser.error('Profile options require --profiling')
     try:
+        if args.export_profile:
+            if args.profiling or args.prepare_only or args.identity or not args.profile_output:
+                raise ValueError('--export-profile requires only --profile-output and optional --config')
+            config=json.loads(args.config.read_text())
+            report=exchange(config['socket'],dict(version=1,operation='profile-artifacts',run_id=args.export_profile),profile_output=args.profile_output)
+            print(json.dumps(report,separators=(',',':')))
+            return report['exit_code']
         fixture = json.loads((Path(__file__).resolve().parents[1] / 'validation/runtime-fixture.json').read_text())
         runtime_input = args.runtime_input or args.input_store / fixture['iso']['path']
+        if args.profile and json.loads(args.config.read_text()).get('diagnostic_profile') != args.profile:
+            raise RuntimeError('Selected frontend and admitted worker profiles differ')
         if args.identity:
             print(json.dumps(identity(Path(__file__).resolve().parents[1], args.config,
                                      args.input_store / 'build-inputs-20260925-v3/build-inputs.iso',
@@ -40,18 +62,22 @@ def main():
             output = args.prepare_only or Path(tmp) / 'payload.iso'
             if not args.prepare_only:
                 config = json.loads(args.config.read_text())
+                if config.get('diagnostic_profile') != args.profile:
+                    raise RuntimeError('Selected frontend and admitted worker profiles differ')
                 readiness = exchange(config['socket'], {'version': 1, 'operation': 'check'})
                 if readiness['exit_code'] != 0:
                     raise RuntimeError('Worker readiness failed: ' + json.dumps(readiness))
                 if int(readiness['observed']['resources']['memory.max']) < 6 * 1024**3:
                     raise RuntimeError('Apply the reviewed 6 GiB/18360-second worker service update first')
             request = prepare(args.repo, args.commit, args.websocketpp or args.repo / 'submodules/websocketpp',
-                              args.input_store / 'build-inputs-20260925-v3/build-inputs.iso', args.rust_input, output, runtime_input, args.world_control)
+                              args.input_store / 'build-inputs-20260925-v3/build-inputs.iso', args.rust_input, output, runtime_input,
+                              args.world_control, profiling=args.profiling, profiler_input=args.profiler_input,
+                              profiler_sha256=args.profiler_input_sha256, diagnostic_profile=args.profile)
             if args.prepare_only:
                 # Preparation success is explicitly not an execution pass.
                 print(json.dumps(dict(scope='prepared-input-only', executed=False, request=request)))
                 return 0
-            report = exchange(config['socket'], request, output)
+            report = exchange(config['socket'], request, output, profile_output=args.profile_output) if args.profiling else exchange(config['socket'], request, output)
             directory = os.environ.get('VALIDATION_AFK_EVIDENCE_DIR')
             if report.get('exit_code') in (0, 1, 2) and report.get('guest', {}).get('normal_world'):
                 directory = directory or Path.home()/'.local/state/eqemu-rust-validator/runs'/report['run_id']
@@ -59,14 +85,17 @@ def main():
                     artifact = export_evidence(report, request['candidate'], directory)
                     if artifact:
                         report['diagnostic_artifact'] = str(artifact)
-                except Exception as error:
-                    report.update(exit_code=2, diagnostic_export_error=str(error)[:500])
+                except EvidenceBudgetError:
+                    report['diagnostic_export_error'] = 'irreducible-artifact-budget'
+                except Exception:
+                    report['diagnostic_export_error'] = 'artifact-export-failed'
     except KeyboardInterrupt:
         report = {'version': 1, 'exit_code': 2, 'error': 'Client interrupted; owned worker cancellation requested by socket close'}
     except Exception as error:
         report = {'version': 1, 'exit_code': 2, 'error': str(error)[-4000:]}
     print(json.dumps(report, separators=(',', ':')))
-    return report['exit_code']
+    # Export is a separate host outcome; never relabel the worker/native cause.
+    return 2 if report.get('diagnostic_export_error') else report['exit_code']
 
 
 if __name__ == '__main__':

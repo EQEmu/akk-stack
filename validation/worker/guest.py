@@ -26,11 +26,13 @@ def user_data(nonce, control):
     }) + '\n'
 
 
-def build_user_data(nonce):
+def build_user_data(nonce, profile=None):
     """The reviewed guest command travels in seed data, never executes on the host."""
     from pathlib import Path
+    from sanitizers import checks
+    selected = checks(BUILD_CHECKS, profile)
     failure = dict(version=1, nonce=nonce, scope='worker-build', exit_code=2,
-                   stage='guest-launcher', selected_checks=list(BUILD_CHECKS), completed_checks=[],
+                   stage='guest-launcher', selected_checks=list(selected), completed_checks=[],
                    error='Guest command exited with status %s before normal completion')
     # Keep a shell parent alive if Python dies before it can report a result.
     # The shell owns shutdown for both normal completion and abrupt process death.
@@ -44,16 +46,18 @@ def build_user_data(nonce):
                 '    printf ' + shlex.quote('\\nEQEMU_WORKER_RESULT ' + json.dumps(failure) + '\\n') + ' "$status"\n'
                 'fi\n'
                 '/usr/sbin/poweroff\n')
-    helpers = [('normal_world.py', Path(__file__).with_name('normal_world.py')),
+    helpers = [(name, Path(__file__).with_name(name)) for name in ('profiling.py','profile_artifacts.py','profile_inputs.py','profile_contract.py')] + [('normal_world.py', Path(__file__).with_name('normal_world.py')),
                *[(name, Path(__file__).parents[1] / name) for name in
                  ('actor.py', 'actor_runtime.py', 'debugger.py', 'runtime-fixture.json')]]
+    if profile: helpers.append(('sanitizers.py', Path(__file__).with_name('sanitizers.py')))
     return '#cloud-config\n' + json.dumps({
         'hostname': 'eqemu-worker-build', 'ssh_pwauth': False, 'disable_root': True,
         'write_files': [
             {'path': '/opt/eqemu-worker-build-guest', 'permissions': '0600',
              'content': Path(__file__).with_name('build_guest.py').read_text()},
             {'path': '/opt/eqemu-worker-nonce', 'permissions': '0600', 'content': nonce},
-            {'path': '/opt/eqemu-worker-checks.json', 'permissions': '0600', 'content': json.dumps(BUILD_CHECKS)},
+            {'path': '/opt/eqemu-worker-checks.json', 'permissions': '0600', 'content': json.dumps(selected)},
+            *([{'path': '/opt/eqemu-worker-profile', 'permissions': '0600', 'content': profile}] if profile else []),
             *[{'path': '/opt/' + name, 'permissions': '0644', 'content': path.read_text()} for name, path in helpers],
         ],
         'runcmd': [['/bin/sh', '-c', launcher]],

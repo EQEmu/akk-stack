@@ -158,9 +158,13 @@ class Readiness(unittest.TestCase):
             self.assertTrue(any(call.args[0] == 102 for call in kill.call_args_list))
             self.assertTrue(any(call.args[1] == normal.signal.SIGKILL for call in kill.call_args_list))
 
-    def run_observer(self, control=None, died=False, interrupt=False, mode="valid", clean=True):
+    def run_observer(self, control=None, died=False, interrupt=False, mode="valid", clean=True, sanitizer=False):
         with tempfile.TemporaryDirectory() as tmp:
             server = Path(tmp)
+            if sanitizer:
+                (server/'eqemu_config.json').write_text(json.dumps({'server': {
+                    'database': {'password': 'candidate-replacement'},
+                    'world': {'key': 'candidate-replacement'}}}))
             world, zone = Mock(pid=101), Mock(pid=102)
             world.poll.return_value = 1 if died else None
             zone.poll.return_value = None
@@ -184,6 +188,10 @@ class Readiness(unittest.TestCase):
             reports = []
             def launch(args, **kwargs):
                 env = kwargs['env']
+                if sanitizer:
+                    kwargs['stdout'].write(b'runtime error: ' + b'x'*960
+                        + ('0123456789abcdef'*3).encode() + b' later\n'*1200)
+                    kwargs['stdout'].flush()
                 if Path(args[0]).name == 'world':
                     self.assertFalse(any(key.startswith('EQEMU_INSERVER_TEST_') for key in env))
                     process = world
@@ -209,6 +217,8 @@ class Readiness(unittest.TestCase):
                 children.append(process)
                 return process
             def cleanup(processes, *, diagnostics):
+                if mode == 'sanitized-clean':
+                    for process in processes: process.poll.return_value = 0
                 if mode == 'cleanup-error':
                     raise RuntimeError('simulated stop failure')
                 if mode == 'progress-hang':
@@ -222,12 +232,16 @@ class Readiness(unittest.TestCase):
                     replacement.write_bytes(reports[0].read_bytes())
                     replacement.replace(reports[0])
                 return clean
-            with patch.object(normal.os, 'geteuid', return_value=65534), \
+            with (normal.observer_credential_pipe(normal.encoded(['0123456789abcdef'*3, 'fedcba9876543210'*3]))
+                  if sanitizer else contextlib.nullcontext()) as credentials, \
+                    patch.object(normal.sys, 'stdin', types.SimpleNamespace(buffer=credentials) if sanitizer else sys.stdin), \
+                    patch.dict(os.environ, {'ASAN_OPTIONS': 'detect_leaks=1'} if sanitizer else {}), \
+                    patch.object(normal.os, 'geteuid', return_value=65534), \
                     patch.object(normal.resource, 'setrlimit'), patch.object(normal.Path, 'is_file', return_value=True), \
                     patch.object(normal.subprocess, 'Popen', side_effect=launch) as popen, \
                     patch.object(normal, 'world_connected', side_effect=connections, return_value=True), \
                     patch.object(normal, 'probe', side_effect=probes, return_value=True) as probe, \
-                    patch.object(normal, 'cpu_ticks', side_effect=[0, 0, 1, 4]), \
+                    patch.object(normal, 'cpu_ticks', side_effect=[0, 0, 1, 0 if mode == 'activity' else 4]), \
                     patch.object(normal, 'stop', side_effect=cleanup) as stop, \
                     patch.object(normal.time, 'monotonic', side_effect=itertools.count(0, .1)), \
                     patch.object(normal.time, 'sleep'), contextlib.redirect_stdout(output):
@@ -240,11 +254,51 @@ class Readiness(unittest.TestCase):
                     ports = probe.call_args_list[0].kwargs['used_ports']
                     self.assertIsInstance(ports, set)
                     self.assertTrue(all(call.kwargs['used_ports'] is ports for call in probe.call_args_list))
+            if sanitizer:
+                self.assertNotIn('0123456789', output.getvalue())
+                self.assertNotIn('fedcba9876', output.getvalue())
             lines = output.getvalue().splitlines()
             frames = [json.loads(line.removeprefix('NORMAL_WORLD_RESULT ')) for line in lines
                       if line.startswith('NORMAL_WORLD_RESULT ')]
             self.assertEqual(len(frames), 1)
             return frames[0]
+
+    def test_sanitized_observer_uses_original_pipe_credentials_despite_changed_config(self):
+        result = self.run_observer(died=True, sanitizer=True)
+        self.assertEqual(result['exit_code'], 1)
+        self.assertTrue(result['cleanup_complete'])
+        first = result['failure_evidence']['first_sanitizer_diagnostic']['world-console.log']
+        self.assertIn('*', first['text'])
+        self.assertNotIn('0123456789', first['text'])
+        self.assertIn('runtime error:', first['text'])
+
+    def test_sanitized_assertion_latch_is_separate_from_responsiveness(self):
+        for case in (dict(control='assertion'),dict(mode='activity')):
+            with self.subTest(case=case):
+                result=self.run_observer(sanitizer=True,**case)
+                self.assertEqual(result['pre_cleanup_observation']['condition'],'assertion')
+                self.assertEqual(result['failure_evidence']['observation']['condition'],'responsive')
+
+    def test_advisory_snapshot_errors_cannot_replace_native_cleanup_or_exit(self):
+        with patch.object(normal,'failure_snapshot',side_effect=RuntimeError('guest-secret')):
+            result=self.run_observer(died=True,sanitizer=True)
+        self.assertTrue(result['cleanup_complete'])
+        self.assertEqual(result['exit_code'],1)
+        self.assertEqual(result['native_exit_codes'][0]['returncode'],1)
+        self.assertEqual(result['capture_error'],'post-snapshot-unavailable')
+        self.assertNotIn('guest-secret',json.dumps(result))
+        with patch.object(normal.FailureCapture,'finish',side_effect=ValueError('guest-secret')):
+            result=self.run_observer(died=True,sanitizer=True)
+        self.assertTrue(result['cleanup_complete'])
+        self.assertEqual(result['pre_cleanup_observation']['first_observed_exited'],'world')
+        self.assertEqual(result['capture_error'],'resources-unavailable')
+        self.assertNotIn('failure_resources',result)
+        with patch.object(normal,'failure_snapshot',side_effect=RuntimeError('guest-secret')):
+            result=self.run_observer(mode='sanitized-clean',sanitizer=True)
+        self.assertEqual(result['exit_code'],0)
+        self.assertTrue(result['cleanup_complete'])
+        self.assertNotIn('capture_error',result)
+        self.assertNotIn('pre_cleanup_observation',result)
 
     def test_direct_observer_cancellation_keeps_precleanup_state(self):
         result = self.run_observer(mode='observer-cancel')

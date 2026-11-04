@@ -92,6 +92,12 @@ Run source regressions without sudo:
 python3 -B -m unittest discover -s tests/worker -v
 ```
 
+## Opt-in process profiling
+
+See [PROFILING.md](PROFILING.md) for independent timelines, Heaptrack/perf,
+bounded partial artifacts and the separate additive release proposal. Source
+packaging and host fixtures do not activate or qualify a guest selection.
+
 ## Working-copy Rust formatting
 
 `scripts/format-worker-snapshot` submits an uncommitted `rust/actors` snapshot to

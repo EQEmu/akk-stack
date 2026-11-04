@@ -1,0 +1,28 @@
+#!/usr/bin/python3 -I
+"""Trusted host adapter for the supported installed T3 CLI, never copied to a VM.
+
+T3_VALIDATION_CLI_CONFIG may select a trusted JSON object with command and env.
+Only this adapter knows the desktop package layout. No app credentials are read.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--base-dir', required=True)
+parser.add_argument('--thread', required=True)
+args = parser.parse_args()
+config = dict(command=['/opt/T3 Code (Beta)/t3code',
+    '/opt/T3 Code (Beta)/resources/app.asar/apps/server/dist/bin.mjs'],
+    env={'ELECTRON_RUN_AS_NODE': '1'})
+if os.environ.get('T3_VALIDATION_CLI_CONFIG'):
+    config = json.loads(Path(os.environ['T3_VALIDATION_CLI_CONFIG']).read_text())
+if (set(config) != {'command', 'env'} or not isinstance(config['command'], list)
+        or not config['command'] or not all(isinstance(s, str) and s for s in config['command'])
+        or not Path(config['command'][0]).is_absolute() or not isinstance(config['env'], dict)
+        or not all(isinstance(k, str) and isinstance(v, str) for k, v in config['env'].items())):
+    raise ValueError('Expected trusted absolute CLI command and string environment')
+os.execve(config['command'][0], [*config['command'], 'thread', 'send', '--base-dir',
+    args.base_dir, '--json', args.thread, '-'], {**os.environ, **config['env']})

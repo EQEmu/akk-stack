@@ -37,6 +37,8 @@ CONTROLS = ('pass', 'assertion', 'missing-result', 'deadline', 'controller-death
 OWNED_CONTROLS = (*CONTROLS, 'build', 'format', 'check-format', 'quick')
 FORMAT_SECONDS = 900
 IMPLEMENTATION_FILES = ('validation/worker/runtime.py', 'validation/worker/guest.py',
+    'validation/worker/profile_contract.py', 'validation/worker/profiling.py', 'validation/worker/profile_artifacts.py', 'validation/worker/profile_inputs.py',
+    'validation/worker/sanitizers.py',
     'validation/worker/build_guest.py', 'validation/worker/normal_world.py', 'validation/actor.py',
     'validation/actor_runtime.py', 'validation/debugger.py', 'validation/runtime-fixture.json',
     'validation/worker/client.py', 'scripts/check-validation-worker',
@@ -74,8 +76,20 @@ def root_file(path):
 def config(path=CONFIG):
     value = read_json(root_file(path))
     required = {'version', 'user', 'worker_uid', 'worker_gid', 'state_dir', 'code_dir', 'submitter', 'socket', 'base_image'}
-    if set(value) != required or type(value['version']) is not int or value['version'] != 1:
-        raise ValueError('Unsupported worker configuration')
+    from profile_contract import EXTRA_FIELDS, validate as validate_profile, verify_release
+    from sanitizers import PROFILE, policy_name
+    profiling=value.get('selection')=='profiling-v1'
+    if profiling:
+        if set(value) != required | EXTRA_FIELDS or type(value['version']) is not int or value['version'] != 1:
+            raise ValueError('Unsupported worker configuration')
+        validate_profile(value,path,read_json(root_file(CONFIG)))
+        verify_release(value,root_file)
+    else:
+        if (set(value) not in (required, required | {'diagnostic_profile'}, required | {'diagnostic_profile', 'diagnostic_policy'})
+                or value.get('diagnostic_profile') not in (None, PROFILE)
+                or type(value['version']) is not int or value['version'] != 1):
+            raise ValueError('Unsupported worker configuration')
+        policy_name(value)
     for key in ('state_dir', 'code_dir', 'socket', 'base_image'):
         if not isinstance(value[key], str) or not Path(value[key]).is_absolute() or any(ch in value[key] for ch in ',\n\r'):
             raise ValueError('Unsupported configured path: ' + key)
@@ -133,12 +147,11 @@ def ready(value):
     try:
         observed['apparmor'] = Path('/proc/self/attr/current').read_text().strip()
         # An unconfined stack member does not remove the enforcing profile's restrictions.
+        from sanitizers import policy_name
+        policy = 'eqemu-validator-profiling' if value.get('selection')=='profiling-v1' else policy_name(value)
         checks['apparmor'] = observed['apparmor'] in (
-            'eqemu-validator (enforce)',
-            'eqemu-validator//&unconfined (enforce)',
-            'unconfined//&eqemu-validator (enforce)',
-        )
-    except OSError:
+            policy + ' (enforce)', policy + '//&unconfined (enforce)', 'unconfined//&' + policy + ' (enforce)')
+    except (OSError, ValueError):
         checks['apparmor'] = False
     try:
         limits = resource_state(); observed['resources'] = limits
@@ -198,8 +211,16 @@ def persisted_report(report):
 
 
 def acquire(value):
-    fd = os.open(Path(value['state_dir']) / 'worker.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    from profile_contract import SHARED_LOCK
+    profiling=value.get('selection')=='profiling-v1'
+    if profiling and value.get('shared_lock')!=SHARED_LOCK: raise ValueError('Unexpected shared profiling lock')
+    path=Path(SHARED_LOCK) if profiling else (Path(value['state_dir']).parent if value.get('diagnostic_profile') else Path(value['state_dir']))/'worker.lock'
+    if profiling and path.resolve()!=path: raise ValueError('Shared lock path traverses a symlink')
+    fd=os.open(path,os.O_RDWR | os.O_NOFOLLOW | (0 if profiling else os.O_CREAT),0o600)
     try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=value['worker_uid'] or info.st_gid!=value['worker_gid'] or stat.S_IMODE(info.st_mode)!=0o600:
+            raise ValueError('Worker lock must be an owned regular mode-0600 file')
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BaseException:
         os.close(fd)
@@ -212,7 +233,7 @@ def scratch_cleanup(job):
     if scratch.exists():
         if scratch.is_symlink() or scratch.stat().st_uid != os.geteuid():
             raise RuntimeError('Unexpected worker scratch ownership')
-        if not {item.name for item in scratch.iterdir()} <= set(SCRATCH):
+        if not {item.name for item in scratch.iterdir()} <= set(SCRATCH) | {'profile-requested'}:
             raise RuntimeError('Unexpected worker scratch contents')
         for item in scratch.iterdir():
             if item.is_symlink() or not item.is_file():
@@ -272,8 +293,20 @@ def cleanup(value):
                 report['scratch_removed'] = True
             except (OSError, ValueError, CleanupError) as error:
                 report['cleanup_error'] = str(error)[:1000]
+            if (job/'profiles').exists():
+                # A client transfer cannot have started before this directory move.
+                report.update(profile_client_export_complete=False,profile_client_export_error='InterruptedBeforeTransfer',
+                              profile_retention_complete=False)
+                retain_profiles(job,Path(value['state_dir']),job.name,report)
+                try:
+                    refresh_profile_receipt(Path(value['state_dir']),job.name,report)
+                    report['profile_retention_complete']=True
+                except (OSError,ValueError) as error:
+                    report['profile_recovery_error']=type(error).__name__
+            else:
+                recover_profile_identity(Path(value['state_dir']),record['run_id'],report)
             atomic_json(Path(value['state_dir']) / 'last-result.json', report)
-            if not report['scratch_removed']:
+            if not report['scratch_removed'] or report.get('profile_retention_complete') is False:
                 return 2  # Retain the active marker and scratch when process absence is uncertain.
             if (job / 'serial.log').exists():
                 os.replace(job / 'serial.log', Path(value['state_dir']) / 'last-serial.log')
@@ -331,20 +364,29 @@ def stop_process(process):
         raise CleanupError('Owned process cleanup could not be confirmed') from error
 
 
-def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, build_result=None, format_result=None, quick_result=None):
-    process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               cwd=scratch, start_new_session=True, close_fds=True,
-                               env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': str(scratch)})
+def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, build_result=None, format_result=None, quick_result=None, diagnostic_profile=None):
     output = bytearray()
     pending = bytearray()
     discarding = False
     notified = False
+    profile_sink = None
+    profile_error = None
+    profile_mode = None
     started_at = time.monotonic()
+    process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               cwd=scratch, start_new_session=True, close_fds=True,
+                               env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': str(scratch)})
     try:
         if on_started is not None:
-            if process.poll() is not None:
-                raise RuntimeError('QEMU exited before ownership was recorded')
             on_started(process.pid)
+        if process.poll() is not None:
+            raise RuntimeError('QEMU exited after launch ownership was recorded')
+        # All post-launch initialization is covered by owned process cleanup.
+        if build_result is not None and (scratch/'profile-requested').exists():
+            from profile_artifacts import Sink
+            profile_sink=Sink(scratch.parent/'profiles')
+            profile_request=json.loads((scratch/'profile-requested').read_text())
+            profile_mode=profile_request['profiling']
         os.set_blocking(process.stdout.fileno(), False)
         with selectors.DefaultSelector() as selector, log.open('xb') as stream:
             selector.register(process.stdout, selectors.EVENT_READ)
@@ -381,6 +423,11 @@ def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, 
                                     connection.sendall(b'{"version":1,"kind":"progress","name":"normal-world-ready"}\n')
                                 finally:
                                     connection.settimeout(None)
+                            if not discarding and profile_sink is not None and line.startswith(b'EQEMU_PROFILE '):
+                                try:
+                                    profile_sink.accept(json.loads(line.removeprefix(b'EQEMU_PROFILE ')))
+                                except Exception as error:
+                                    profile_error=type(error).__name__
                             discarding = False
                         # Ignore oversized serial lines; never forward guest text.
                         if len(pending) > 65536:
@@ -400,8 +447,15 @@ def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, 
                 detail = output[-900:].decode(errors='replace').strip()
                 raise RuntimeError('QEMU exited ' + str(code) + ': ' + detail)
     finally:
-        stop_process(process)
-        process.stdout.close()
+        try:
+            stop_process(process)
+        finally:
+            try: process.stdout.close()
+            except BaseException as error:
+                raise CleanupError('Owned serial pipe cleanup could not be confirmed') from error
+        if profile_sink is not None:
+            build_result['profile_transport']=dict(artifacts=profile_sink.inventory(),export_error=profile_error,
+                complete=False,partial=True)
     results = []
     with log.open('rb') as stream:
         for line in stream:
@@ -442,16 +496,21 @@ def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, 
         format_result.update(result)
         return result['exit_code']
     if (not isinstance(result, dict) or (set(result) != {'version', 'nonce', 'scope', 'exit_code'} if build_result is None
-                                                else not set(result) <= {'version', 'nonce', 'scope', 'exit_code', 'stage', 'error', 'zone_sha256', 'utilities', 'normal_world', 'selected_checks', 'completed_checks'})
+                                                else not set(result) <= {'version', 'nonce', 'scope', 'exit_code', 'stage', 'error', 'zone_sha256', 'utilities', 'normal_world', 'selected_checks', 'completed_checks',
+                                                    *(['diagnostic_profile', 'sanitizers', 'process_returncode'] if diagnostic_profile else [])})
             or type(result.get('version')) is not int or result['version'] != 1 or result.get('nonce') != nonce or result.get('scope') != ('worker-smoke' if build_result is None else 'worker-build')
             or type(result.get('exit_code')) is not int or result['exit_code'] not in ((0, 1) if build_result is None else (0, 1, 2))):
         raise RuntimeError('Malformed guest completion')
     if build_result is not None:
+        from sanitizers import checks as profile_checks
+        selected = profile_checks(BUILD_CHECKS, diagnostic_profile)
+        if result.get('diagnostic_profile') != diagnostic_profile:
+            raise RuntimeError('Guest diagnostic profile mismatch')
         completed = result.get('completed_checks')
-        if (result.get('selected_checks') != list(BUILD_CHECKS) or not isinstance(completed, list)
+        if (result.get('selected_checks') != list(selected) or not isinstance(completed, list)
                 or not all(isinstance(name, str) for name in completed)
-                or len(completed) != len(set(completed)) or not set(completed) <= set(BUILD_CHECKS)
-                or (result['exit_code'] == 0 and completed != list(BUILD_CHECKS))):
+                or len(completed) != len(set(completed)) or not set(completed) <= set(selected)
+                or (result['exit_code'] == 0 and completed != list(selected))):
             raise RuntimeError('Incomplete or malformed build check evidence')
         if not isinstance(result.get('stage'), str) or len(result['stage']) > 100:
             raise RuntimeError('Build stage missing or oversized')
@@ -461,11 +520,28 @@ def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, 
                 or not re.fullmatch('[a-f0-9]{64}', result['zone_sha256']) or not isinstance(result.get('utilities'), dict)):
             raise RuntimeError('Build completion missing zone or utility evidence')
         if result['exit_code'] == 0:
+            if diagnostic_profile:
+                from sanitizers import validate_controls
+                validate_controls(result.get('sanitizers'))
             from normal_world import validate
             normal = validate(result.get('normal_world'))
+            if diagnostic_profile and 'native_exit_codes' not in normal:
+                raise RuntimeError('Sanitized native shutdown exit evidence missing')
             if normal['binaries']['zone'] != result['zone_sha256']:
                 raise RuntimeError('Normal-world zone differs from built candidate')
         build_result.update(result)
+        if profile_sink is not None:
+            complete=not profile_error and result.get('normal_world',{}).get('profiling',{}).get('complete') is True and result['normal_world']['profiling'].get('mode')==profile_mode
+            if complete:
+                try:
+                    from profile_artifacts import validate_collection
+                    validate_collection(profile_sink.directory,profile_mode,profile_request['candidate'],
+                        profile_request['tree'],result['normal_world']['binaries'])
+                except Exception as error:
+                    complete=False
+                    build_result['profile_transport']['export_error']=type(error).__name__
+            build_result['profile_transport'].update(complete=complete,partial=not complete)
+            if not complete: return 2
     return result['exit_code']
 
 
@@ -506,10 +582,13 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
               'control': control, 'exit_code': 2, 'cleanup_complete': False, 'vm_started': False,
               'worker_uid': os.geteuid(), 'coverage': ['tiny-cloud-init'], 'candidate': None}
     if build is not None:
+        from sanitizers import checks as profile_checks
+        diagnostic_profile = build.get('diagnostic_profile')
         control = 'build'
         report.update(operation='build', scope='worker-build', control='build',
                       candidate=build['candidate'], tree=build['tree'], payload_sha256=build['sha256'],
-                      coverage=[], selected_checks=list(BUILD_CHECKS), completed_checks=[])
+                      coverage=[], selected_checks=list(profile_checks(BUILD_CHECKS, diagnostic_profile)), completed_checks=[])
+        if diagnostic_profile: report['diagnostic_profile'] = diagnostic_profile
     if formatting is not None:
         control = 'format' if formatting['operation'] == 'format' else 'check-format'
         report.update(operation=formatting['operation'], scope='working-snapshot-format', control=control,
@@ -547,7 +626,9 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
         payload = build if build is not None else quick if quick is not None else formatting
         if payload is not None:
             receive_payload(connection, scratch / 'payload.iso', payload, time.monotonic() + 120)
-        (scratch / 'user-data').write_text(build_user_data(run_id) if build is not None else
+        if build is not None and build.get('profiling'):
+            (scratch/'profile-requested').write_text(json.dumps({key:build[key] for key in ('profiling','candidate','tree')}))
+        (scratch / 'user-data').write_text((build_user_data(run_id, diagnostic_profile) if diagnostic_profile else build_user_data(run_id)) if build is not None else
                                          quick_user_data(run_id,quick) if quick is not None else
                                          format_user_data(run_id, formatting) if formatting is not None else user_data(run_id, control))
         (scratch / 'meta-data').write_text('instance-id: eqemu-smoke-' + run_id + '\n')
@@ -593,13 +674,15 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
             report['exit_code'] = supervise(args, scratch, job / 'serial.log', connection, deadline, run_id, started)
         else:
             detail = {}
-            report['exit_code'] = supervise(args, scratch, job / 'serial.log', connection, deadline, run_id, started, detail)
+            options = {'diagnostic_profile': diagnostic_profile} if diagnostic_profile else {}
             report['guest'] = detail
+            report['exit_code'] = supervise(args, scratch, job / 'serial.log', connection, deadline, run_id, started, detail, **options)
             report['completed_checks'] = detail['completed_checks']
             if report['implementation_sha256'] != implementation_identity(value):
                 raise RuntimeError('Worker implementation changed during the job')
             if report['exit_code'] == 0:
                 report['coverage'] = ['rust-checks', 'server-build', 'native-utilities', 'normal-world']
+                if diagnostic_profile: report['coverage'].append(diagnostic_profile)
     except Exception as error:
         report['error'] = str(error)[:1000]
         report['exit_code'] = 2
@@ -622,16 +705,143 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
             report.setdefault('timings', {})['total_seconds'] = round(time.monotonic() - started_at, 3)
             if formatting is not None and report['exit_code'] != 0:
                 report.update(changed_files=[], output_snapshot_sha256=formatting['input_snapshot_sha256'])
+        if (job/'profiles').exists():
+            try: retain_profiles(job,state,run_id,report)
+            except Exception as error:
+                report.update(exit_code=2,profile_export_error=type(error).__name__,profile_retention_complete=False)
         if job.exists():
+            if build is not None and diagnostic_profile:
+                report['measurements'] = dict(elapsed_seconds=round(time.monotonic()-started_at, 3),
+                    serial_bytes=(job / 'serial.log').stat().st_size if (job / 'serial.log').exists() else 0)
+                try: report['measurements']['cgroup_memory_peak_bytes'] = (service_cgroup() / 'memory.peak').read_text().strip()
+                except OSError: report['measurements']['cgroup_memory_peak_bytes'] = None
             atomic_json(state / 'last-result.json', persisted_report(report))
             if (job / 'serial.log').exists():
                 os.replace(job / 'serial.log', state / 'last-serial.log')
-            if report['cleanup_complete']:
+            if report['cleanup_complete'] and not (job/'profiles').exists():
                 job.rmdir()
-        if active.exists() and read_json(active).get('run_id') == run_id and report['cleanup_complete']:
+        if report.get('profile_artifacts'):
+            try:
+                from profile_artifacts import send
+                connection.settimeout(30)
+                with connection.makefile('wb') as stream:
+                    send(state/'last-profile',stream)
+                report['profile_client_export_complete']=True
+            except Exception as error:
+                report.update(exit_code=2,profile_client_export_complete=False,profile_client_export_error=type(error).__name__)
+            finally:
+                connection.settimeout(None)
+                try: refresh_profile_receipt(state,run_id,report)
+                except Exception as error:
+                    report.update(exit_code=2,profile_receipt_retention_error=type(error).__name__,profile_retention_complete=False)
+                atomic_json(state/'last-result.json',persisted_report(report))
+        if active.exists() and read_json(active).get('run_id') == run_id and report['cleanup_complete'] and report.get('profile_retention_complete',True):
             active.unlink()
         os.close(lock)
     return report
+
+
+def profile_receipt(report):
+    """Keep independent verdicts without retaining native logs, argv or environment."""
+    def code(value): return value if type(value) is int and -255<=value<=255 else None
+    def flag(value): return value if type(value) is bool else None
+    def mapping(value): return value if isinstance(value,dict) else {}
+    guest=mapping(report.get('guest'))
+    normal=mapping(guest.get('normal_world'))
+    profile=mapping(normal.get('profiling'))
+    transport=mapping(guest.get('profile_transport'))
+    collectors=profile.get('collector_exit_codes')
+    analyzers=profile.get('analysis_exit_codes')
+    preflight=profile.get('preflight')
+    return dict(overall_exit_code=code(report.get('exit_code',2)),
+        guest_exit_code=code(guest.get('exit_code')),workload_exit_code=code(normal.get('exit_code')),
+        native_cleanup_complete=flag(normal.get('cleanup_complete')),database_cleanup_complete=flag(normal.get('database_cleanup')),
+        vm_cleanup_complete=flag(report.get('cleanup_complete')),
+        client_export=dict(complete=flag(report.get('profile_client_export_complete')),
+            error_present=bool(report.get('profile_client_export_error')) if type(report.get('profile_client_export_complete')) is bool else None),
+        profiler=dict(mode=profile.get('mode') if profile.get('mode') in ('timeline','heaptrack','perf') else None,
+            complete=flag(profile.get('complete')),error_present=bool(profile.get('error')),
+            collector_exit_codes=[code(value) for value in collectors] if isinstance(collectors,list) and len(collectors)<=2 else None,
+            analysis_exit_codes={key:code(analyzers[key]) for key in ('world-interpret','zone-interpret','world-analysis','zone-analysis') if isinstance(analyzers,dict) and key in analyzers},
+            preflight_exit_code=code(preflight.get('exit_code')) if isinstance(preflight,dict) else None),
+        transport=dict(complete=flag(transport.get('complete')),
+            partial=flag(transport.get('partial')),error_present=bool(transport.get('export_error'))))
+
+
+def retain_profiles(job,state,run_id,report):
+    """Retain one bounded private collection independently of disposable VM cleanup."""
+    from profile_artifacts import inventory
+    current=state/'last-profile'
+    metadata=dict(version=1,run_id=run_id,files=inventory(job/'profiles'),
+        partial=True,receipt_finalization='pending',execution_exit_code=2,
+        result_receipt=dict(profile_receipt(report),overall_exit_code=2),
+        retention='one collection, replaced by next profiling run; operator may delete sooner')
+    # Rename the bytes and their identity together. Cleanup receipts may be replaced
+    # later by ExecStopPost without making the collection unidentifiable.
+    if len(json.dumps(metadata).encode())>16384: raise ValueError('Retained profile receipt oversized')
+    atomic_json(job/'profiles/collection.json',metadata)
+    if current.exists():
+        inventory(current)
+        for path in current.iterdir(): path.unlink()
+        current.rmdir()
+    os.replace(job/'profiles',current)
+    report['profile_artifacts']=metadata
+
+
+def retained_profile(state,run_id):
+    """The collection identity is independent of any later job/cleanup receipt."""
+    from profile_artifacts import inventory
+    directory=state/'last-profile'
+    files=inventory(directory)
+    metadata=read_json(directory/'collection.json')
+    if not isinstance(metadata,dict) or set(metadata)!={'version','run_id','files','partial','execution_exit_code','result_receipt','receipt_finalization','retention'} or metadata.get('version')!=1 or metadata['receipt_finalization'] not in ('pending','complete'):
+        raise ValueError('Malformed retained profile identity')
+    if metadata['run_id']!=run_id: return None
+    if metadata['files']!=files: raise ValueError('Retained profile changed')
+    if type(metadata['execution_exit_code']) is not int or metadata['execution_exit_code'] not in (0,1,2):
+        raise ValueError('Malformed retained profile verdict')
+    receipt=metadata['result_receipt']
+    if not isinstance(receipt,dict) or set(receipt)!=set(profile_receipt({})) or receipt['overall_exit_code']!=metadata['execution_exit_code']:
+        raise ValueError('Malformed retained profile result receipt')
+    return metadata
+
+
+def refresh_profile_receipt(state,run_id,report):
+    """Atomically attach the final client-transfer outcome to its retained bytes."""
+    metadata=retained_profile(state,run_id)
+    if metadata is None: raise ValueError('Profile identity changed during client export')
+    complete_profile_receipt(state,metadata,profile_receipt(report))
+    report['profile_artifacts']=metadata
+
+
+def complete_profile_receipt(state,metadata,receipt):
+    metadata.update(execution_exit_code=receipt['overall_exit_code'],result_receipt=receipt,
+        receipt_finalization='complete',partial=receipt['transport']['complete'] is not True)
+    if len(json.dumps(metadata).encode())>16384: raise ValueError('Retained profile receipt oversized')
+    atomic_json(state/'last-profile/collection.json',metadata)
+
+
+def recover_profile_identity(state,run_id,report):
+    """Recovery may replace verdict/cleanup fields, never the matching collection ID."""
+    if not (state/'last-profile/collection.json').is_file(): return
+    try:
+        metadata=retained_profile(state,run_id)
+        if metadata is None: return
+        if metadata['receipt_finalization']=='pending':
+            prior=read_json(state/'last-result.json',limit=65536)
+            if prior.get('run_id')!=run_id: raise ValueError('Pending profile receipt has no matching execution result')
+            receipt=prior.get('profile_pending_receipt') or profile_receipt(prior)
+            report['profile_pending_receipt']=receipt
+            report['profile_retention_complete']=False
+            if type(receipt.get('client_export',{}).get('complete')) is not bool:
+                raise ValueError('Original client transfer outcome remains unknown')
+            complete_profile_receipt(state,metadata,receipt)
+            report['profile_retention_complete']=True
+        report['profile_artifacts']=dict(metadata,partial=True)
+        report['profile_recovery']=dict(original_execution_exit_code=metadata['execution_exit_code'],partial=True)
+    except (OSError,ValueError) as error:
+        report['profile_retention_complete']=False
+        report['profile_recovery_error']=type(error).__name__
 
 
 def request(connection, value):
@@ -658,8 +868,29 @@ def request(connection, value):
     if data == {'version': 1, 'operation': 'last-result'}:
         return {'version': 1, 'operation': 'last-result', 'scope': 'worker-observation',
                 'exit_code': 0, 'result': read_json(Path(value['state_dir']) / 'last-result.json', limit=65536)}
+    if data.get('operation')=='profile-artifacts':
+        if set(data)!={'version','operation','run_id'} or not isinstance(data['run_id'],str) or not re.fullmatch('[a-f0-9]{32}',data['run_id']):
+            raise ValueError('Exact profiling run ID required')
+        from profile_artifacts import inventory, send
+        lock=acquire(value)
+        try:
+            metadata=retained_profile(Path(value['state_dir']),data['run_id'])
+            if metadata is None: raise ValueError('Requested profile is no longer retained')
+            directory=Path(value['state_dir'])/'last-profile'
+            connection.settimeout(30)
+            with connection.makefile('wb') as stream: send(directory,stream)
+            return dict(version=1,operation='profile-artifacts',scope='profile-export-only',exit_code=0,executed=False,
+                run_id=data['run_id'],workload_exit_code=metadata['result_receipt']['workload_exit_code'],
+                execution_exit_code=metadata['execution_exit_code'],result_receipt=metadata['result_receipt'],profile_artifacts=metadata)
+        finally: os.close(lock)
     if data.get('operation') == 'build':
-        if (set(data) != {'version', 'operation', 'candidate', 'tree', 'bytes', 'sha256'}
+        from sanitizers import PROFILE
+        diagnostic_profile = data.get('diagnostic_profile')
+        if (set(data) != {'version', 'operation', 'candidate', 'tree', 'bytes', 'sha256'} | ({'profiling'} if 'profiling' in data else set()) | ({'diagnostic_profile'} if 'diagnostic_profile' in data else set())
+                or ('profiling' in data and data['profiling'] not in ('timeline','heaptrack','perf'))
+                or ('diagnostic_profile' in data and diagnostic_profile != PROFILE)
+                or diagnostic_profile != value.get('diagnostic_profile')
+                or ('profiling' in data and 'diagnostic_profile' in data)
                 or not all(isinstance(data[key], str) and re.fullmatch('[a-f0-9]{40}', data[key]) for key in ('candidate', 'tree'))
                 or not isinstance(data['sha256'], str) or not re.fullmatch('[a-f0-9]{64}', data['sha256'])
                 or type(data['bytes']) is not int or not 0 < data['bytes'] <= PAYLOAD_LIMIT):
@@ -728,7 +959,7 @@ def main(argv=None):
         except Exception as error:
             result = {'version': 1, 'exit_code': 2, 'error': str(error)[:1000], 'scope': 'worker-smoke'}
         try:
-            connection.settimeout(5)
+            connection.settimeout(30)
             connection.sendall((json.dumps(result, separators=(',', ':')) + '\n').encode())
         except OSError:
             pass  # A disconnected client cannot prevent owned cleanup/result persistence.

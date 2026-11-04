@@ -29,7 +29,11 @@ ENV = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
 STAGE = 'guest-start'
 DEADLINE = 0
 CHECKS = ()
+PROFILE = None
+SANITIZERS = None
 COMPLETED = []
+PROFILING = None
+BUILD_METADATA = {}
 INFRASTRUCTURE = re.compile(
     r'out of memory|cannot allocate memory|no space left|killed signal|command not found|'
     r'failed to download|no matching package named|attempting to make an HTTP request|'
@@ -81,9 +85,13 @@ def command(name, args, *, cwd=None, candidate=False, seconds=900):
         code = process.wait(timeout=5)
         if code:
             detail = tail.decode(errors='replace')
-            infrastructure = code < 0 or code in (126, 127) or infrastructure_failure
+            sanitized_signal = PROFILE and re.search(r'AddressSanitizer|UndefinedBehaviorSanitizer|LeakSanitizer|runtime error:', detail)
+            infrastructure = (code < 0 and not sanitized_signal) or code in (126, 127) or infrastructure_failure
             error = CandidateFailure if candidate and not infrastructure else RuntimeError
-            raise error(name + ': exit ' + str(code) + '\n' + detail[-3000:])
+            failure = error(name + ': exit ' + str(code) + '\n' + detail[-3000:])
+            failure.returncode = code
+            failure.output = detail
+            raise failure
         if name in CHECKS:
             COMPLETED.append(name)
         return tail.decode(errors='replace')
@@ -205,20 +213,38 @@ def prepare_rust():
 
 
 def configure_native(source, registry, seconds=14400):
+    if PROFILE is not None and PROFILING is not None:
+        raise RuntimeError('Sanitizers and profiling are mutually exclusive')
     output = WORK / 'build'
+    profile_flags = ['-DCMAKE_C_FLAGS=-fno-omit-frame-pointer', '-DCMAKE_CXX_FLAGS=-fno-omit-frame-pointer'] if PROFILING else []
     command('native-configure', ['cmake', '-S', str(source), '-B', str(output), '-G', 'Ninja',
-            '-DCMAKE_BUILD_TYPE=RelWithDebInfo', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
+            '-DCMAKE_BUILD_TYPE=RelWithDebInfo', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON', *profile_flags,
             '-DCMAKE_TOOLCHAIN_FILE=' + str(registry / 'scripts/buildsystems/vcpkg.cmake'),
             '-DVCPKG_TARGET_TRIPLET=x64-linux', '-DVCPKG_HOST_TRIPLET=x64-linux',
             '-DVCPKG_INSTALL_OPTIONS=--no-downloads;--binarysource=clear',
-            *['-DEQEMU_BUILD_' + name + '=ON' for name in ('SERVER', 'TESTS', 'LOGIN', 'LUA', 'PERL', 'CLIENT_FILES')]],
+            *['-DEQEMU_BUILD_' + name + '=ON' for name in ('SERVER', 'TESTS', 'LOGIN', 'LUA', 'PERL', 'CLIENT_FILES')],
+            *(['-DEQEMU_SANITIZERS=ON'] if PROFILE else [])],
             candidate=True, seconds=seconds)
+    if PROFILING:
+        global BUILD_METADATA
+        cache=(output/'CMakeCache.txt').read_text()
+        selected={row.split('=',1)[0]:row.split('=',1)[1] for row in cache.splitlines() if '=' in row and row.startswith(('CMAKE_C_FLAGS', 'CMAKE_CXX_FLAGS', 'CMAKE_BUILD_TYPE:', 'CMAKE_C_COMPILER:', 'CMAKE_CXX_COMPILER:', 'EQEMU_'))}
+        if '-fsanitize' in cache or re.search(r'^[^#\n]*SANIT[^=]*=ON$',cache,re.M|re.I):
+            raise RuntimeError('Allocation/CPU profiling requires unsanitized build; use separate correctness run')
+        BUILD_METADATA=dict(kind='symbolized-unsanitized-profiling', cmake_cache_sha256=sha(output/'CMakeCache.txt'), flags=selected,
+            rustflags=ENV.get('RUSTFLAGS',''), compiler=command('profile-compiler',['c++','--version']),
+            compiler_sha256=sha('/usr/bin/c++'))
     return output
 
 
 def build():
+    global SANITIZERS
+    if PROFILE is not None and PROFILING is not None:
+        raise RuntimeError('Sanitizers and profiling are mutually exclusive')
     source, registry = prepare_source()
     cargo = prepare_rust()
+    if PROFILING: ENV['RUSTFLAGS']='-C force-frame-pointers=yes -C debuginfo=2'
+    else: ENV.pop('RUSTFLAGS', None)
     workspace = source / 'rust/actors'
     command('rust-format', [cargo, 'fmt', '--all', '--check'], cwd=workspace, candidate=True)
     # Resolve the available offline closure before compiling candidate code. Missing
@@ -230,12 +256,30 @@ def build():
             ('rust-doctests', ['test', '--workspace', '--locked', '--offline', '--doc'])):
         command(stage, [cargo, *args], cwd=workspace, candidate=True)
     output = configure_native(source, registry)
+    if PROFILE:
+        from sanitizers import controls
+        SANITIZERS = controls(sys.modules[__name__], output)
     command('native-build', ['cmake', '--build', str(output), '--parallel', '1'], candidate=True, seconds=14400)
+    if PROFILE:
+        from sanitizers import final_binaries
+        final_binaries(sys.modules[__name__], output, SANITIZERS)
     # Filter while draining the complete symbol stream; never retain the full nm table.
     command('zone-rust-symbol', ['/bin/bash', '-o', 'pipefail', '-c',
             'nm --defined-only "$1" | awk \'$2 ~ /^[Tt]$/ && $3 == "eqemu_rust_bridge_v1" {found=1} END {exit !found}\'',
             'zone-symbol', str(output / 'bin/zone')], candidate=True, seconds=120)
-    tests = command('native-utilities', [str(output / 'bin/tests')], cwd=output, candidate=True, seconds=600)
+    if PROFILING:
+        for name in ('world','zone'):
+            command('profile-unsanitized-'+name,['/bin/bash','-o','pipefail','-c',
+                'nm -D "$1" | awk \'/__asan_init|__ubsan_handle/ {found=1} END {exit found ? 1 : 0}\'',
+                'unsanitized-check',str(output/'bin'/name)])
+    try:
+        tests = command('native-utilities', [str(output / 'bin/tests')], cwd=output, candidate=True, seconds=600)
+    except RuntimeError as error:
+        # A printed passed frame never overrides a later LSan nonzero exit.
+        frames = [json.loads(line.removeprefix('EQEMU_TEST_RESULT '))
+                  for line in getattr(error, 'output', '').splitlines() if line.startswith('EQEMU_TEST_RESULT ')]
+        if len(frames) == 1: error.utilities = frames[0]
+        raise
     frames = [json.loads(line.removeprefix('EQEMU_TEST_RESULT ')) for line in tests.splitlines() if line.startswith('EQEMU_TEST_RESULT ')]
     if len(frames) != 1:
         raise RuntimeError('Native utilities did not complete')
@@ -243,14 +287,23 @@ def build():
     if not (result.get('passed') is True and result.get('finalized') is True and result.get('selected', 0) > 0
             and result['selected'] == result.get('started') == result.get('completed') and result.get('failed') == 0):
         raise RuntimeError('Native utility completion is incomplete or inconsistent')
+    if PROFILING:
+        BUILD_METADATA['compile_commands_sha256']=sha(output/'compile_commands.json')
+        BUILD_METADATA['binary_notes']={name:command('profile-binary-notes-'+name,['readelf','-n',str(output/'bin'/name)]) for name in ('world','zone')}
     return {'zone_sha256': sha(output / 'bin/zone'), 'utilities': result}
 
 
 def main():
-    global DEADLINE, CHECKS, STAGE
+    global DEADLINE, CHECKS, STAGE, PROFILE, PROFILING, WORK, LOGS
     if os.geteuid() != 0 or not Path('/opt/eqemu-worker-build-guest').is_file():
         raise RuntimeError('Disposable build guest only')
     nonce = Path('/opt/eqemu-worker-nonce').read_text().strip()
+    if Path('/opt/eqemu-worker-profile').exists():
+        from sanitizers import PROFILE as SELECTED_PROFILE, ENV as SANITIZER_ENV
+        PROFILE = Path('/opt/eqemu-worker-profile').read_text().strip()
+        if PROFILE != SELECTED_PROFILE: raise RuntimeError('Unknown guest profile')
+        WORK = Path('/opt/eqemu-build-' + PROFILE); LOGS = WORK / 'runtime-logs'
+        ENV.update(SANITIZER_ENV)
     CHECKS = tuple(json.loads(Path('/opt/eqemu-worker-checks.json').read_text()))
     COMPLETED.clear()
     result = dict(version=1, scope='worker-build', nonce=nonce, exit_code=2,
@@ -261,6 +314,16 @@ def main():
         Path('/media/eqemu-input').mkdir(parents=True)
         command('mount-job', ['mount', '-o', 'ro,nosuid,nodev', '/dev/sr1', '/media/eqemu-input'])
         identity = provision()
+        if identity.get('diagnostic_profile') != PROFILE: raise RuntimeError('Guest input profile mismatch')
+        PROFILING=identity.get('profiling')
+        if PROFILING is not None and PROFILE is not None: raise RuntimeError('Sanitizers and profiling are mutually exclusive')
+        if PROFILING is not None:
+            from profiling import MODES, TOOLS, file_identity
+            if PROFILING not in MODES: raise RuntimeError('Unknown profiling mode')
+            if 'profilers.tar' in identity['files']:
+                from profile_inputs import install
+                install(sys.modules[__name__], '/media/eqemu-input/profilers.tar', PROFILING)
+            for path in TOOLS.get(PROFILING,()): file_identity(path)
         result.update(build())
         STAGE = 'normal-world'
         print('EQEMU_STAGE normal-world', flush=True)
@@ -270,9 +333,15 @@ def main():
         COMPLETED.append('normal-world')
         result['exit_code'] = 0
     except Exception as error:
+        if getattr(error, 'sanitizers', None): result['sanitizers'] = error.sanitizers
+        if getattr(error, 'utilities', None): result['utilities'] = error.utilities
+        if PROFILE and hasattr(error, 'returncode'): result['process_returncode'] = error.returncode
         if isinstance(getattr(error, 'result', None), dict):
             result['normal_world'] = error.result
         result.update(exit_code=1 if isinstance(error, CandidateFailure) else 2, error=str(error)[-3500:])
+    if PROFILE:
+        result['diagnostic_profile'] = PROFILE
+        if SANITIZERS is not None: result['sanitizers'] = SANITIZERS
     # Bound encoded error bytes too; escaped Unicode must fit the 32 KiB frame.
     while len(json.dumps(result.get('error', ''))) > 3500:
         result['error'] = result['error'][len(result['error'])//2:]

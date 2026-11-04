@@ -10,12 +10,12 @@ CONFIG = Path('/etc/eqemu-validator/config.json')
 REPORT_LIMIT = 16384
 
 
-def exchange(path, request, payload=None):
+def exchange(path, request, payload=None, profile_output=None):
     """Read-only probes may briefly race systemd's previous connection teardown."""
     deadline = time.monotonic() + 2
     while True:
         try:
-            return exchange_once(path, request, payload)
+            return exchange_once(path, request, payload, profile_output=profile_output)
         except (ConnectionResetError, BrokenPipeError):
             # Never retry a build/smoke request: it may already have started a VM.
             if (request not in ({'version': 1, 'operation': 'check'}, {'version': 1, 'operation': 'last-result'})
@@ -24,8 +24,12 @@ def exchange(path, request, payload=None):
             time.sleep(.1)
 
 
-def exchange_once(path, request, payload=None):
+def exchange_once(path, request, payload=None, profile_output=None):
     from snapshot import RESULT_LIMIT
+    profile_sink=None
+    if profile_output is not None:
+        from profile_artifacts import Sink
+        profile_sink=Sink(profile_output)
     report_limit = 65536 if request['operation'] in ('quick', 'build', 'last-result') else RESULT_LIMIT if 'input_snapshot_sha256' in request else REPORT_LIMIT
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         formatting = 'input_snapshot_sha256' in request
@@ -47,6 +51,11 @@ def exchange_once(path, request, payload=None):
                 if len(data) > report_limit:
                     raise RuntimeError('Worker report size limit exceeded')
             line, _, rest = data.partition(b'\n')
+            if line.startswith(b'EQEMU_PROFILE '):
+                if profile_sink is None: raise RuntimeError('Unrequested raw profiling export')
+                profile_sink.accept(json.loads(line.removeprefix(b'EQEMU_PROFILE ')))
+                data=bytearray(rest)
+                continue
             result = json.loads(line)
             if isinstance(result, dict) and result.get('kind') == 'progress':
                 if (request['operation'] != 'build' or notified or result !=
@@ -69,6 +78,8 @@ def exchange_once(path, request, payload=None):
                     or result.get('vm_started') is not True or result.get('candidate') != request['candidate']
                     or result.get('tree') != request['tree'] or result.get('payload_sha256') != request['sha256']):
                 raise RuntimeError('Incomplete or mismatched build result')
+            if request['operation'] == 'build' and result.get('diagnostic_profile') != request.get('diagnostic_profile'):
+                raise RuntimeError('Mismatched diagnostic profile')
             if request['operation'] == 'build' and result['exit_code'] == 0:
                 from normal_world import validate
                 detail = result.get('guest', {})
@@ -89,6 +100,16 @@ def exchange_once(path, request, payload=None):
                     or not isinstance(result.get('checks'), dict) or not result['checks']
                     or any(value is not True for value in result['checks'].values())):
                 raise RuntimeError('Incomplete readiness result')
+        if profile_sink is not None:
+            expected=result.get('profile_artifacts',{}).get('files')
+            if expected is not None and profile_sink.inventory()!=expected:
+                raise RuntimeError('Profiling export identity mismatch; partial files retained')
+        if request.get('profiling'):
+            if profile_sink is None: raise RuntimeError('Requested profiling has no private artifact sink')
+            expected=result.get('profile_artifacts',{}).get('files')
+            if result['exit_code']==0 and (not expected or result.get('guest',{}).get('profile_transport',{}).get('complete') is not True
+                    or result.get('guest',{}).get('normal_world',{}).get('profiling',{}).get('mode')!=request['profiling']):
+                raise RuntimeError('Requested profiling missing or incomplete')
         return result
 
 

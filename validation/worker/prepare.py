@@ -12,11 +12,21 @@ import inputs
 
 NATIVE_SHA = '02e94c23126772a5ca81ac7974661c3010cbdbba8da7647b8ac6cedac6c3cca4'
 RUST_SHA = '2a0b4a32ad74b3bb49195d43f76ece75166b500004f5b32f868cb20a292bc52f'
+# Full builds only. Quick/format retain their independent original pin.
+ADDITIONAL_RUST = {'7bc2a72f9b8a3ebcea3dfcb879ab2d5bb0a23d5ab4913e85f9acd728a5ce932e': 171284480}
 PAYLOAD_LIMIT = 1024**3
 
 
 def record(path, limit=PAYLOAD_LIMIT):
     return inputs.file_record(Path(path), limit)
+
+
+def verify_rust(path):
+    """Accept the original pin or the one reviewed additive full-build identity."""
+    item = record(path, 220 * 1024**2)
+    if item['sha256'] != RUST_SHA and ADDITIONAL_RUST.get(item['sha256']) != item['bytes']:
+        raise ValueError('Missing or changed offline Rust input: ' + str(path))
+    return item
 
 
 def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world_control=None, *, diagnostic_profile=None, profiling=None, profiler_input=None, profiler_sha256=None):
@@ -37,9 +47,9 @@ def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world
     if diagnostic_profile is not None:
         from sanitizers import PROFILE
         if diagnostic_profile != PROFILE: raise ValueError('Unknown diagnostic profile')
-    for path, expected in ((native, NATIVE_SHA), (rust, RUST_SHA)):
-        if record(path)['sha256'] != expected:
-            raise ValueError('Missing or changed offline input: ' + str(path))
+    if record(native)['sha256'] != NATIVE_SHA:
+        raise ValueError('Missing or changed offline input: ' + str(native))
+    verify_rust(rust)
     fixture = json.loads((Path(__file__).resolve().parents[1] / 'runtime-fixture.json').read_text())
     if runtime is None:
         raise ValueError('Normal-world validation requires the pinned public runtime ISO')

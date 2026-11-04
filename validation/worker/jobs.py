@@ -401,6 +401,7 @@ def main(argv=None):
     launch.add_argument('--t3-base-dir', type=Path, required=True)
     launch.add_argument('--notify-adapter', type=Path, default=ROOT / 'scripts/t3-validation-notify')
     launch.add_argument('--websocketpp', type=Path, required=True)
+    launch.add_argument('--rust-input', type=Path, help='Finite source-pinned full-build Rust bundle; original default if omitted')
     launch.add_argument('--config', type=Path, default=Path('/etc/eqemu-validator/config.json'))
     for name in ('status', 'cancel', 'retry-notification'):
         sub.add_parser(name).add_argument('job_id')
@@ -422,6 +423,8 @@ def main(argv=None):
                 head = view.location('HEAD')
             command = [str(ROOT / 'scripts/validate-worker-candidate'), '--repo', str(args.repo.resolve()),
                 '--commit', args.commit, '--websocketpp', str(args.websocketpp.resolve()), '--config', str(args.config.resolve())]
+            if args.rust_input is not None:
+                command += ['--rust-input', str(args.rust_input.resolve())]
             if args.profile == 'full-sanitizers':
                 from sanitizers import PROFILE
                 config = json.loads(args.config.read_text())

@@ -248,3 +248,16 @@ it or qualify any guest/application workload. Sanitizer admission preparation
 keeps the original 15-helper retained inventory separate from the new 19-helper
 release inventory; it does not require new profiling helpers in old releases.
 Ordinary, diagnostic and profiling selections still use the same exclusive lock.
+
+Frontend identity separately hashes its own `sanitizers.py`, even when an installed
+copy lives elsewhere. Installed identity recognizes the retained master/v1/v2/v3
+runtime SHA256 values and binds their explicit 14/15-helper inventories. Every old
+helper must exist and its bytes participate in identity; a changed historical
+runtime cannot select the historical inventory. These are read-only identity
+contracts, never admission or execution authorization.
+
+A profiling selection always binds all 24 release sources plus its manifest. Any
+profiling helper in another selection requires the complete new 19-helper worker
+inventory. A new runtime with all profiling helpers absent also refuses; missing
+or partial new releases cannot fall back to a historical inventory. Current
+frontend identities differ from historical frontend pins by design.

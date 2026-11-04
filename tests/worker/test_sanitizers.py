@@ -49,20 +49,15 @@ def retained_fixture(current, files):
 
 class Sanitizers(unittest.TestCase):
     def test_identity_accepts_ordinary_installed_closure_and_requires_diagnostic_helper(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary); config = root/'config.json'; seen = []
-            value = dict(code_dir=str(root/'worker'),base_image=str(root/'base'))
-            config.write_text(json.dumps(value))
-            def record(path):
-                seen.append(path); return dict(bytes=1,sha256='a'*64)
-            with patch.object(identity,'record',side_effect=record):
-                identity.identity(root,config,root/'native',root/'rust')
-            self.assertFalse(any(path == root/'worker/validation/worker/sanitizers.py' for path in seen))
-            config.write_text(json.dumps(dict(value,diagnostic_profile=sanitizers.PROFILE)))
-            seen.clear()
-            with patch.object(identity,'record',side_effect=record):
-                identity.identity(root,config,root/'native',root/'rust')
-            self.assertTrue(any(path == root/'worker/validation/worker/sanitizers.py' for path in seen))
+        from test_identity import identity_fixture
+        with identity_fixture('ordinary') as fixture:
+            self.assertTrue(fixture.calculate()['identity'].startswith('eqemu-worker-v1:'))
+            self.assertFalse((fixture.installed/'validation/worker/sanitizers.py').exists())
+        for slot in ('v1','v2','v3'):
+            with identity_fixture(slot) as fixture:
+                self.assertTrue(fixture.calculate()['identity'].startswith('eqemu-worker-v1:'))
+                (fixture.installed/'validation/worker/sanitizers.py').unlink()
+                with self.assertRaises(FileNotFoundError): fixture.calculate()
 
     def test_diagnostic_export_has_independent_profile_identity(self):
         with tempfile.TemporaryDirectory() as temporary:

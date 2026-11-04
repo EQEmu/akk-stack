@@ -29,6 +29,24 @@ def verify_rust(path):
     return item
 
 
+def copy_verified(path, target, expected):
+    """Stage bounded bytes against the record that passed admission, never a later pin."""
+    with inputs.regular(Path(path), expected['bytes']) as (source, info), target.open('xb') as output:
+        if info.st_size != expected['bytes']:
+            raise ValueError('Offline input changed before staging: ' + str(path))
+        remaining = expected['bytes']
+        while remaining:
+            block = source.read(min(1024**2, remaining))
+            if not block:
+                raise ValueError('Offline input changed while staging: ' + str(path))
+            output.write(block); remaining -= len(block)
+        if source.read(1):
+            raise ValueError('Offline input changed while staging: ' + str(path))
+    if record(target, expected['bytes']) != expected:
+        raise ValueError('Offline input identity changed while staging: ' + str(path))
+    target.chmod(0o400)
+
+
 def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world_control=None, *, diagnostic_profile=None, profiling=None, profiler_input=None, profiler_sha256=None):
     """Select a complete clean commit, without freezing Cargo manifests or test counts."""
     if profiling is not None and diagnostic_profile is not None:
@@ -36,9 +54,11 @@ def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world
     if profiling is not None:
         from profiling import MODES
         if profiling not in MODES: raise ValueError('Unknown profiling mode')
+    approved = {}
     if profiler_input is not None:
-        from profile_inputs import manifest, digest
-        if profiling not in ('heaptrack','perf') or digest(profiler_input)!=profiler_sha256:
+        from profile_inputs import manifest
+        approved['profilers.tar'] = record(profiler_input)
+        if profiling not in ('heaptrack','perf') or approved['profilers.tar']['sha256']!=profiler_sha256:
             raise ValueError('Profiler input needs selected mode and exact SHA256')
         manifest(profiler_input)
     elif profiler_sha256 is not None:
@@ -47,13 +67,15 @@ def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world
     if diagnostic_profile is not None:
         from sanitizers import PROFILE
         if diagnostic_profile != PROFILE: raise ValueError('Unknown diagnostic profile')
-    if record(native)['sha256'] != NATIVE_SHA:
+    approved['native.iso'] = record(native)
+    if approved['native.iso']['sha256'] != NATIVE_SHA:
         raise ValueError('Missing or changed offline input: ' + str(native))
-    verify_rust(rust)
+    approved['rust-inputs.tar'] = verify_rust(rust)
     fixture = json.loads((Path(__file__).resolve().parents[1] / 'runtime-fixture.json').read_text())
     if runtime is None:
         raise ValueError('Normal-world validation requires the pinned public runtime ISO')
-    if record(runtime) != {key: fixture['iso'][key] for key in ('bytes', 'sha256')}:
+    approved['runtime.iso'] = record(runtime)
+    if approved['runtime.iso'] != {key: fixture['iso'][key] for key in ('bytes', 'sha256')}:
         raise ValueError('Missing/changed public runtime ISO: ' + str(runtime))
     if world_control not in (None, 'startup', 'assertion', 'cancel'):
         raise ValueError('Unknown normal-world control')
@@ -80,12 +102,18 @@ def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world
         dep_entries, dep_links = dependency.inventory(wanted['commit'], wanted['tree'])
         dep_archive = root / 'websocketpp.tar'; dependency.archive(wanted['commit'], dep_archive)
         inputs.verify_archive(dep_archive, dep_entries, dep_links)
-        files = {'eqemu.tar': archive, 'websocketpp.tar': dep_archive,
-                 'native.iso': Path(native).resolve(), 'rust-inputs.tar': Path(rust).resolve(),
-                 'runtime.iso': Path(runtime).resolve()}
-        if profiler_input is not None: files['profilers.tar']=Path(profiler_input).resolve()
+        originals = {'native.iso': Path(native).absolute(), 'rust-inputs.tar': Path(rust).absolute(),
+                     'runtime.iso': Path(runtime).absolute()}
+        if profiler_input is not None: originals['profilers.tar'] = Path(profiler_input).absolute()
+        staged = root/'pinned'; staged.mkdir()
+        files = {'eqemu.tar': archive, 'websocketpp.tar': dep_archive}
+        for name, path in originals.items():
+            target = staged/name
+            copy_verified(path, target, approved[name])
+            files[name] = target
         identity = {'version': 1, 'candidate': commit, 'tree': tree,
-                    'files': {name: record(path) for name, path in files.items()}, 'world_control': world_control}
+                    'files': {'eqemu.tar': record(archive), 'websocketpp.tar': record(dep_archive), **approved},
+                    'world_control': world_control}
         if profiling is not None: identity['profiling']=profiling
         if diagnostic_profile is not None: identity['diagnostic_profile'] = diagnostic_profile
         # Repeat after archiving: dirty index/worktree changes must not silently disappear.
@@ -101,7 +129,8 @@ def prepare(repo, commit, websocketpp, native, rust, output, runtime=None, world
                            check=True, timeout=120, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             payload = record(output)
             # Detect changes to public media while the ISO builder read it.
-            if any(record(path) != identity['files'][name] for name, path in files.items()):
+            if (any(record(path) != identity['files'][name] for name, path in files.items())
+                    or any(record(path) != approved[name] for name, path in originals.items())):
                 raise ValueError('Offline input changed while packaging')
             request = dict(version=1, operation='build', candidate=commit, tree=tree, **payload)
             if diagnostic_profile is not None: request['diagnostic_profile'] = diagnostic_profile

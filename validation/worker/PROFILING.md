@@ -62,8 +62,8 @@ Profiling builds use RelWithDebInfo, native `-fno-omit-frame-pointer` and Rust
 `-C force-frame-pointers=yes -C debuginfo=2`. Metadata binds CMake cache, compiler
 database, compiler bytes/version, binary SHA256/build notes, tool bytes,
 source/tree, input media and public fixture. Sanitizer flags and ASan/UBSan
-symbols are rejected. Sanitized correctness is a separate run; master gains no
-sanitizer mode here. Do not assume Heaptrack/ASan compatibility.
+symbols are rejected. Opt-in sanitizer correctness uses `--profile asan-ubsan-native-v1`
+in a separate run from profiling. Do not assume Heaptrack/ASan compatibility.
 
 Metadata labels the fixed normal-world workload, readiness warmup and one
 repetition. This is not a production performance baseline. Compare identical

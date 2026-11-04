@@ -23,11 +23,70 @@ import runtime
 import test_runtime
 
 
+class FrontendExport(unittest.TestCase):
+    def test_actual_frontend_preserves_worker_verdict_on_export_failure_and_separates_process_exit(self):
+        import normal_world
+        from unittest.mock import Mock
+        from test_failure_evidence import failure
+        controller = r"""
+import importlib.machinery,importlib.util,json,os,sys
+from pathlib import Path
+from unittest.mock import patch
+root,mode,source,config,evidence=sys.argv[1:]
+loader=importlib.machinery.SourceFileLoader('ks48_cli',str(Path(root)/'scripts/validate-worker-candidate'))
+spec=importlib.util.spec_from_loader(loader.name,loader);cli=importlib.util.module_from_spec(spec);loader.exec_module(cli)
+report=json.loads(Path(source).read_text())
+ready=dict(exit_code=0,observed=dict(resources={'memory.max':str(6*1024**3)}))
+args=['validate-worker-candidate','--repo',str(Path(config).parent),'--commit','a'*40,'--config',config,'--profile','asan-ubsan-native-v1']
+with patch.object(sys,'argv',args),patch.object(cli,'prepare',return_value=dict(candidate='a'*40)),patch.object(cli,'exchange',side_effect=[ready,report]),patch.dict(os.environ,VALIDATION_AFK_EVIDENCE_DIR=evidence):
+    if mode=='exception':
+        with patch.object(cli,'export_evidence',side_effect=OSError('/private/path/guest-secret')):code=cli.main()
+    else:code=cli.main()
+raise SystemExit(code)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);config=root/'config.json'
+            config.write_text(json.dumps(dict(socket='/unused',diagnostic_profile='asan-ubsan-native-v1')))
+            capture=normal_world.FailureCapture(time.monotonic(),proc=root/'absent')
+            children=[Mock(pid=123,poll=Mock(return_value=None)),Mock(pid=124,poll=Mock(return_value=None))]
+            for name,child in zip(('world','zone'),children):capture.watch(name,child)
+            capture.latch(children,'deadline',[None,None])
+            for code in (0,1,2):
+                for mode in ('exception','success','budget'):
+                    with self.subTest(worker_exit=code,mode=mode):
+                        report=failure();report.update(exit_code=code,diagnostic_profile='asan-ubsan-native-v1')
+                        normal=report['guest']['normal_world'];normal.update(exit_code=code,database_cleanup=True,
+                            pre_cleanup_observation=capture.pre,failure_resources=capture.finish(),
+                            native_exit_codes=[dict(name='world',returncode=0),dict(name='zone',returncode=code)])
+                        if mode=='budget':normal['malformed_oversize']='x'*20000
+                        source=root/'report.json';source.write_text(json.dumps(report))
+                        directory=root/('evidence-'+str(code)+'-'+mode)
+                        result=subprocess.run([sys.executable,'-B','-c',controller,str(ROOT),mode,str(source),str(config),str(directory)],
+                            capture_output=True,text=True,timeout=5)
+                        self.assertEqual(result.returncode,code if mode=='success' else 2,result.stderr)
+                        actual=json.loads(result.stdout)
+                        self.assertNotIn('guest-secret',result.stdout+result.stderr)
+                        self.assertNotIn('/private/path',result.stdout+result.stderr)
+                        self.assertEqual(actual['exit_code'],code)
+                        self.assertTrue(actual['cleanup_complete'])
+                        self.assertEqual(actual['guest'],report['guest'])
+                        if mode=='success':
+                            self.assertTrue(Path(actual.pop('diagnostic_artifact')).is_file())
+                        else:
+                            self.assertEqual(actual.pop('diagnostic_export_error'),
+                                'irreducible-artifact-budget' if mode=='budget' else 'artifact-export-failed')
+                            self.assertFalse(directory.exists())
+                        self.assertEqual(actual,report)
+
+
 class Transfer(unittest.TestCase):
     def test_guest_final_result_preserves_large_structured_native_exception(self):
         import normal_world
         normal = dict(exit_code=1, cleanup_complete=True,
                       failure_evidence=dict(console={'zone': 'useful detail '+('x'*9000)}))
+        capture = normal_world.FailureCapture(time.monotonic(),proc=Path('/nonexistent-ks48-proc'))
+        capture.latch([], 'assertion')
+        normal.update(pre_cleanup_observation=capture.pre,failure_resources=capture.finish())
         failure = build_guest.CandidateFailure('assertion ' + '\ufffd'*3500)
         failure.result = normal
         old = {key: getattr(build_guest, key) for key in ('WORK', 'MEDIA', 'DEADLINE', 'CHECKS', 'STAGE')}
@@ -265,14 +324,21 @@ class BuildRuntime(unittest.TestCase):
         import test_client
         import test_normal_world_diagnostics
         with patch.object(runtime.shutil, 'disk_usage', return_value=SimpleNamespace(free=100*1024**3, used=0)):
-            error, candidate_failure = test_normal_world_diagnostics.AdapterDiagnostics().replay(True, source=True)
+            error, candidate_failure = test_normal_world_diagnostics.AdapterDiagnostics().replay(True, source=True, sanitizer=True)
         self.assertIsInstance(error, candidate_failure)
         self.assertNotIn('guest-secret', json.dumps(error.result))
         source = error.result['failure_evidence']['source_diagnostics']
-        self.assertEqual(source['context'], 'result=failed [redacted]')
-        self.assertEqual(source['stack'], '#0 native_function [redacted]\n')
+        self.assertEqual(source['context'], 'result=failed ************')
+        self.assertEqual(source['stack'], '#0 native_function ************\n')
         self.assertTrue(source['advisory'])
+        first = error.result['failure_evidence']['first_sanitizer_diagnostic']['zone-console.log']
+        self.assertIn('runtime error:', first['text'])
+        self.assertIn('*', first['text'])
+        self.assertNotIn('guest', first['text'])
+        self.assertTrue(first['advisory'])
         self.assertFalse(error.result['failure_evidence']['stack_capture']['captured'])
+        self.assertEqual(error.result['pre_cleanup_observation']['first_observed_exited'],'zone')
+        self.assertEqual(error.result['failure_resources']['kernel']['state'],'denied')
         detail = dict(version=1, nonce='a'*32, scope='worker-build', exit_code=1,
             stage='normal-world', error='udp-timeout', selected_checks=list(runtime.BUILD_CHECKS),
             completed_checks=list(runtime.BUILD_CHECKS[:-1]), normal_world=error.result)

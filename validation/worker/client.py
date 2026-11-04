@@ -78,6 +78,8 @@ def exchange_once(path, request, payload=None, profile_output=None):
                     or result.get('vm_started') is not True or result.get('candidate') != request['candidate']
                     or result.get('tree') != request['tree'] or result.get('payload_sha256') != request['sha256']):
                 raise RuntimeError('Incomplete or mismatched build result')
+            if request['operation'] == 'build' and result.get('diagnostic_profile') != request.get('diagnostic_profile'):
+                raise RuntimeError('Mismatched diagnostic profile')
             if request['operation'] == 'build' and result['exit_code'] == 0:
                 from normal_world import validate
                 detail = result.get('guest', {})

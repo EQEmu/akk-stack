@@ -38,6 +38,7 @@ OWNED_CONTROLS = (*CONTROLS, 'build', 'format', 'check-format', 'quick')
 FORMAT_SECONDS = 900
 IMPLEMENTATION_FILES = ('validation/worker/runtime.py', 'validation/worker/guest.py',
     'validation/worker/profile_contract.py', 'validation/worker/profiling.py', 'validation/worker/profile_artifacts.py', 'validation/worker/profile_inputs.py',
+    'validation/worker/sanitizers.py',
     'validation/worker/build_guest.py', 'validation/worker/normal_world.py', 'validation/actor.py',
     'validation/actor_runtime.py', 'validation/debugger.py', 'validation/runtime-fixture.json',
     'validation/worker/client.py', 'scripts/check-validation-worker',
@@ -76,12 +77,19 @@ def config(path=CONFIG):
     value = read_json(root_file(path))
     required = {'version', 'user', 'worker_uid', 'worker_gid', 'state_dir', 'code_dir', 'submitter', 'socket', 'base_image'}
     from profile_contract import EXTRA_FIELDS, validate as validate_profile, verify_release
+    from sanitizers import PROFILE, policy_name
     profiling=value.get('selection')=='profiling-v1'
-    if set(value) != required | (EXTRA_FIELDS if profiling else set()) or type(value['version']) is not int or value['version'] != 1:
-        raise ValueError('Unsupported worker configuration')
     if profiling:
+        if set(value) != required | EXTRA_FIELDS or type(value['version']) is not int or value['version'] != 1:
+            raise ValueError('Unsupported worker configuration')
         validate_profile(value,path,read_json(root_file(CONFIG)))
         verify_release(value,root_file)
+    else:
+        if (set(value) not in (required, required | {'diagnostic_profile'}, required | {'diagnostic_profile', 'diagnostic_policy'})
+                or value.get('diagnostic_profile') not in (None, PROFILE)
+                or type(value['version']) is not int or value['version'] != 1):
+            raise ValueError('Unsupported worker configuration')
+        policy_name(value)
     for key in ('state_dir', 'code_dir', 'socket', 'base_image'):
         if not isinstance(value[key], str) or not Path(value[key]).is_absolute() or any(ch in value[key] for ch in ',\n\r'):
             raise ValueError('Unsupported configured path: ' + key)
@@ -139,11 +147,11 @@ def ready(value):
     try:
         observed['apparmor'] = Path('/proc/self/attr/current').read_text().strip()
         # An unconfined stack member does not remove the enforcing profile's restrictions.
-        name='eqemu-validator-profiling' if value.get('selection')=='profiling-v1' else 'eqemu-validator'
+        from sanitizers import policy_name
+        policy = 'eqemu-validator-profiling' if value.get('selection')=='profiling-v1' else policy_name(value)
         checks['apparmor'] = observed['apparmor'] in (
-            name+' (enforce)',name+'//&unconfined (enforce)','unconfined//&'+name+' (enforce)',
-        )
-    except OSError:
+            policy + ' (enforce)', policy + '//&unconfined (enforce)', 'unconfined//&' + policy + ' (enforce)')
+    except (OSError, ValueError):
         checks['apparmor'] = False
     try:
         limits = resource_state(); observed['resources'] = limits
@@ -206,7 +214,7 @@ def acquire(value):
     from profile_contract import SHARED_LOCK
     profiling=value.get('selection')=='profiling-v1'
     if profiling and value.get('shared_lock')!=SHARED_LOCK: raise ValueError('Unexpected shared profiling lock')
-    path=Path(SHARED_LOCK) if profiling else Path(value['state_dir'])/'worker.lock'
+    path=Path(SHARED_LOCK) if profiling else (Path(value['state_dir']).parent if value.get('diagnostic_profile') else Path(value['state_dir']))/'worker.lock'
     if profiling and path.resolve()!=path: raise ValueError('Shared lock path traverses a symlink')
     fd=os.open(path,os.O_RDWR | os.O_NOFOLLOW | (0 if profiling else os.O_CREAT),0o600)
     try:
@@ -356,7 +364,7 @@ def stop_process(process):
         raise CleanupError('Owned process cleanup could not be confirmed') from error
 
 
-def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, build_result=None, format_result=None, quick_result=None):
+def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, build_result=None, format_result=None, quick_result=None, diagnostic_profile=None):
     output = bytearray()
     pending = bytearray()
     discarding = False
@@ -488,16 +496,21 @@ def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, 
         format_result.update(result)
         return result['exit_code']
     if (not isinstance(result, dict) or (set(result) != {'version', 'nonce', 'scope', 'exit_code'} if build_result is None
-                                                else not set(result) <= {'version', 'nonce', 'scope', 'exit_code', 'stage', 'error', 'zone_sha256', 'utilities', 'normal_world', 'selected_checks', 'completed_checks'})
+                                                else not set(result) <= {'version', 'nonce', 'scope', 'exit_code', 'stage', 'error', 'zone_sha256', 'utilities', 'normal_world', 'selected_checks', 'completed_checks',
+                                                    *(['diagnostic_profile', 'sanitizers', 'process_returncode'] if diagnostic_profile else [])})
             or type(result.get('version')) is not int or result['version'] != 1 or result.get('nonce') != nonce or result.get('scope') != ('worker-smoke' if build_result is None else 'worker-build')
             or type(result.get('exit_code')) is not int or result['exit_code'] not in ((0, 1) if build_result is None else (0, 1, 2))):
         raise RuntimeError('Malformed guest completion')
     if build_result is not None:
+        from sanitizers import checks as profile_checks
+        selected = profile_checks(BUILD_CHECKS, diagnostic_profile)
+        if result.get('diagnostic_profile') != diagnostic_profile:
+            raise RuntimeError('Guest diagnostic profile mismatch')
         completed = result.get('completed_checks')
-        if (result.get('selected_checks') != list(BUILD_CHECKS) or not isinstance(completed, list)
+        if (result.get('selected_checks') != list(selected) or not isinstance(completed, list)
                 or not all(isinstance(name, str) for name in completed)
-                or len(completed) != len(set(completed)) or not set(completed) <= set(BUILD_CHECKS)
-                or (result['exit_code'] == 0 and completed != list(BUILD_CHECKS))):
+                or len(completed) != len(set(completed)) or not set(completed) <= set(selected)
+                or (result['exit_code'] == 0 and completed != list(selected))):
             raise RuntimeError('Incomplete or malformed build check evidence')
         if not isinstance(result.get('stage'), str) or len(result['stage']) > 100:
             raise RuntimeError('Build stage missing or oversized')
@@ -507,8 +520,13 @@ def supervise(args, scratch, log, connection, deadline, nonce, on_started=None, 
                 or not re.fullmatch('[a-f0-9]{64}', result['zone_sha256']) or not isinstance(result.get('utilities'), dict)):
             raise RuntimeError('Build completion missing zone or utility evidence')
         if result['exit_code'] == 0:
+            if diagnostic_profile:
+                from sanitizers import validate_controls
+                validate_controls(result.get('sanitizers'))
             from normal_world import validate
             normal = validate(result.get('normal_world'))
+            if diagnostic_profile and 'native_exit_codes' not in normal:
+                raise RuntimeError('Sanitized native shutdown exit evidence missing')
             if normal['binaries']['zone'] != result['zone_sha256']:
                 raise RuntimeError('Normal-world zone differs from built candidate')
         build_result.update(result)
@@ -564,10 +582,13 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
               'control': control, 'exit_code': 2, 'cleanup_complete': False, 'vm_started': False,
               'worker_uid': os.geteuid(), 'coverage': ['tiny-cloud-init'], 'candidate': None}
     if build is not None:
+        from sanitizers import checks as profile_checks
+        diagnostic_profile = build.get('diagnostic_profile')
         control = 'build'
         report.update(operation='build', scope='worker-build', control='build',
                       candidate=build['candidate'], tree=build['tree'], payload_sha256=build['sha256'],
-                      coverage=[], selected_checks=list(BUILD_CHECKS), completed_checks=[])
+                      coverage=[], selected_checks=list(profile_checks(BUILD_CHECKS, diagnostic_profile)), completed_checks=[])
+        if diagnostic_profile: report['diagnostic_profile'] = diagnostic_profile
     if formatting is not None:
         control = 'format' if formatting['operation'] == 'format' else 'check-format'
         report.update(operation=formatting['operation'], scope='working-snapshot-format', control=control,
@@ -607,7 +628,7 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
             receive_payload(connection, scratch / 'payload.iso', payload, time.monotonic() + 120)
         if build is not None and build.get('profiling'):
             (scratch/'profile-requested').write_text(json.dumps({key:build[key] for key in ('profiling','candidate','tree')}))
-        (scratch / 'user-data').write_text(build_user_data(run_id) if build is not None else
+        (scratch / 'user-data').write_text((build_user_data(run_id, diagnostic_profile) if diagnostic_profile else build_user_data(run_id)) if build is not None else
                                          quick_user_data(run_id,quick) if quick is not None else
                                          format_user_data(run_id, formatting) if formatting is not None else user_data(run_id, control))
         (scratch / 'meta-data').write_text('instance-id: eqemu-smoke-' + run_id + '\n')
@@ -653,13 +674,15 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
             report['exit_code'] = supervise(args, scratch, job / 'serial.log', connection, deadline, run_id, started)
         else:
             detail = {}
+            options = {'diagnostic_profile': diagnostic_profile} if diagnostic_profile else {}
             report['guest'] = detail
-            report['exit_code'] = supervise(args, scratch, job / 'serial.log', connection, deadline, run_id, started, detail)
+            report['exit_code'] = supervise(args, scratch, job / 'serial.log', connection, deadline, run_id, started, detail, **options)
             report['completed_checks'] = detail['completed_checks']
             if report['implementation_sha256'] != implementation_identity(value):
                 raise RuntimeError('Worker implementation changed during the job')
             if report['exit_code'] == 0:
                 report['coverage'] = ['rust-checks', 'server-build', 'native-utilities', 'normal-world']
+                if diagnostic_profile: report['coverage'].append(diagnostic_profile)
     except Exception as error:
         report['error'] = str(error)[:1000]
         report['exit_code'] = 2
@@ -687,6 +710,11 @@ def run_vm(value, connection, control='pass', build=None, formatting=None, quick
             except Exception as error:
                 report.update(exit_code=2,profile_export_error=type(error).__name__,profile_retention_complete=False)
         if job.exists():
+            if build is not None and diagnostic_profile:
+                report['measurements'] = dict(elapsed_seconds=round(time.monotonic()-started_at, 3),
+                    serial_bytes=(job / 'serial.log').stat().st_size if (job / 'serial.log').exists() else 0)
+                try: report['measurements']['cgroup_memory_peak_bytes'] = (service_cgroup() / 'memory.peak').read_text().strip()
+                except OSError: report['measurements']['cgroup_memory_peak_bytes'] = None
             atomic_json(state / 'last-result.json', persisted_report(report))
             if (job / 'serial.log').exists():
                 os.replace(job / 'serial.log', state / 'last-serial.log')
@@ -856,8 +884,13 @@ def request(connection, value):
                 execution_exit_code=metadata['execution_exit_code'],result_receipt=metadata['result_receipt'],profile_artifacts=metadata)
         finally: os.close(lock)
     if data.get('operation') == 'build':
-        if (set(data) != {'version', 'operation', 'candidate', 'tree', 'bytes', 'sha256'} | ({'profiling'} if 'profiling' in data else set())
+        from sanitizers import PROFILE
+        diagnostic_profile = data.get('diagnostic_profile')
+        if (set(data) != {'version', 'operation', 'candidate', 'tree', 'bytes', 'sha256'} | ({'profiling'} if 'profiling' in data else set()) | ({'diagnostic_profile'} if 'diagnostic_profile' in data else set())
                 or ('profiling' in data and data['profiling'] not in ('timeline','heaptrack','perf'))
+                or ('diagnostic_profile' in data and diagnostic_profile != PROFILE)
+                or diagnostic_profile != value.get('diagnostic_profile')
+                or ('profiling' in data and 'diagnostic_profile' in data)
                 or not all(isinstance(data[key], str) and re.fullmatch('[a-f0-9]{40}', data[key]) for key in ('candidate', 'tree'))
                 or not isinstance(data['sha256'], str) or not re.fullmatch('[a-f0-9]{64}', data['sha256'])
                 or type(data['bytes']) is not int or not 0 < data['bytes'] <= PAYLOAD_LIMIT):

@@ -232,3 +232,19 @@ performs 20,000 temporary 4 KiB allocations and executes `busy_stack`. A separat
 run deliberately uses SIGKILL. Actual perf denial is recorded without changing
 policy. No worker/VM, Cargo or EQEmu candidate runs. Publication tests use a fake
 filesystem and mocked root/service calls.
+
+## Consolidated source contract
+
+The sanitizer correctness route and profiling route are separate selections.
+`--profile asan-ubsan-native-v1` cannot be combined with `--profiling`, profiler
+inputs or profile export. Packaging and the worker request parser reject combined
+selectors, including explicit null request fields. Profiling uses an unsanitized
+symbolized build; its Rust frame-pointer/debug flags do not carry into ordinary
+or sanitizer builds. Heaptrack preload is never combined with sanitizers.
+
+The combined release includes both sets of helpers in its finite source identity.
+Its hashes differ from historical installed releases. Preparing it does not admit
+it or qualify any guest/application workload. Sanitizer admission preparation
+keeps the original 15-helper retained inventory separate from the new 19-helper
+release inventory; it does not require new profiling helpers in old releases.
+Ordinary, diagnostic and profiling selections still use the same exclusive lock.

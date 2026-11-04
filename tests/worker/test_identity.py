@@ -36,6 +36,32 @@ class Identity(unittest.TestCase):
                     self.assertNotEqual(original, identity.identity(root, config, root / 'native.iso', root / 'rust.tar'))
             self.assertNotIn(root / 'candidate', paths)
 
+    def test_policy_files_bind_exact_ordinary_legacy_v1_and_explicit_slots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); config = root / 'config.json'
+            baseline = dict(code_dir=str(root / 'worker'), base_image=str(root / 'base'))
+            configurations = [({}, 'eqemu-validator'),
+                ({'diagnostic_profile': 'asan-ubsan-native-v1'}, 'eqemu-validator-asan-v1'),
+                *[({'diagnostic_profile': 'asan-ubsan-native-v1', 'diagnostic_policy': name}, name)
+                    for name in ('eqemu-validator-asan-v1', 'eqemu-validator-asan-v2', 'eqemu-validator-asan-v3')]]
+            for fields, policy in configurations:
+                config.write_text(json.dumps(dict(baseline, **fields)))
+                seen = []
+                with patch.object(identity, 'record', side_effect=lambda path: seen.append(path) or
+                        dict(bytes=1, sha256='a'*64)):
+                    identity.identity(root, config, root / 'native', root / 'rust')
+                policies = {path for path in seen if str(path).startswith('/etc/')}
+                self.assertEqual(policies, {Path('/etc/systemd/system') / (policy + '@.service'),
+                    Path('/etc/systemd/system') / (policy + '.socket'), Path('/etc/apparmor.d') / policy})
+                self.assertEqual(any(path.name == 'sanitizers.py' for path in seen), bool(fields))
+            for fields in ({'diagnostic_policy': 'eqemu-validator-asan-v2'},
+                    {'diagnostic_profile': 'asan-ubsan-native-v1', 'diagnostic_policy': 'eqemu-validator-asan-v4'},
+                    {'diagnostic_profile': 'other'}):
+                config.write_text(json.dumps(dict(baseline, **fields)))
+                with self.assertRaises(ValueError), patch.object(identity, 'record') as record:
+                    identity.identity(root, config, root / 'native', root / 'rust')
+                record.assert_not_called()
+
     def test_cli_identity_does_not_contact_worker_or_prepare_candidate(self):
         loader = importlib.machinery.SourceFileLoader('candidate_cli', str(ROOT / 'scripts/validate-worker-candidate'))
         spec = importlib.util.spec_from_loader(loader.name, loader)

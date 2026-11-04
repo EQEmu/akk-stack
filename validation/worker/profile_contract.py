@@ -13,7 +13,7 @@ SOCKET='/run/eqemu-validator-profiling.sock'
 RELEASE_ROOT='/srv/eqemu-validator-profiling'
 EXTRA_FIELDS={'selection','confinement','shared_lock','source_commit','release_manifest_sha256'}
 SOURCE_FILES=(
-    'validation/worker/runtime.py','validation/worker/guest.py','validation/worker/build_guest.py',
+    'validation/worker/sanitizers.py','validation/worker/runtime.py','validation/worker/guest.py','validation/worker/build_guest.py',
     'validation/worker/normal_world.py','validation/worker/client.py','validation/worker/identity.py',
     'validation/worker/prepare.py','validation/worker/profiling.py','validation/worker/profile_artifacts.py',
     'validation/worker/profile_inputs.py','validation/worker/profile_contract.py',

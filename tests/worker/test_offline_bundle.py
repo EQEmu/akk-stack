@@ -84,6 +84,28 @@ class OfflineBundle(unittest.TestCase):
             self.assertEqual(command[command.index('--rust-input')+1],tmp+'/bundle.tar')
             self.assertTrue(start.call_args.kwargs['snapshot'])
 
+    @unittest.skipUnless(os.environ.get('OFFLINE_TEST_PACKAGE'), 'sealed package path not supplied')
+    def test_approved_bundle_identity_with_fixed_retained_closures(self):
+        # Historical helper bytes are fixtures copied from Git, never installed or executed.
+        from test_identity import identity_fixture, PINS
+        bundle = Path(os.environ['OFFLINE_TEST_PACKAGE'])/'rust-inputs.tar'
+        prepare.verify_rust(bundle)
+        for slot in PINS:
+            with self.subTest(slot=slot), identity_fixture(slot) as fixture:
+                installed = {name:(fixture.installed/name).read_bytes() for name in fixture.helpers}
+                original = fixture.calculate()
+                (fixture.root/'rust').write_bytes(bundle.read_bytes())
+                selected = fixture.calculate()
+                self.assertNotEqual(original, selected)
+                self.assertEqual(selected, fixture.calculate())
+                # The merged sanitizer fix and the new finite selector both bind frontend identity.
+                for name in ('sanitizers.py', 'prepare.py'):
+                    path = fixture.frontend/'validation/worker'/name; raw = path.read_bytes()
+                    path.write_bytes(raw+b'\n# frontend fixture change\n')
+                    self.assertNotEqual(selected, fixture.calculate())
+                    path.write_bytes(raw)
+                self.assertEqual(installed,{name:(fixture.installed/name).read_bytes() for name in fixture.helpers})
+
     @unittest.skipUnless(os.environ.get('OFFLINE_TEST_BASE') and os.environ.get('OFFLINE_TEST_CACHE'), 'retained data paths not supplied')
     def test_real_package_independent_rebuild(self):
         base = Path(os.environ['OFFLINE_TEST_BASE']); cache = Path(os.environ['OFFLINE_TEST_CACHE'])

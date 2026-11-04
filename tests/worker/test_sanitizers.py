@@ -57,12 +57,12 @@ class Sanitizers(unittest.TestCase):
                 seen.append(path); return dict(bytes=1,sha256='a'*64)
             with patch.object(identity,'record',side_effect=record):
                 identity.identity(root,config,root/'native',root/'rust')
-            self.assertFalse(any(path.name == 'sanitizers.py' for path in seen))
+            self.assertFalse(any(path == root/'worker/validation/worker/sanitizers.py' for path in seen))
             config.write_text(json.dumps(dict(value,diagnostic_profile=sanitizers.PROFILE)))
             seen.clear()
             with patch.object(identity,'record',side_effect=record):
                 identity.identity(root,config,root/'native',root/'rust')
-            self.assertTrue(any(path.name == 'sanitizers.py' for path in seen))
+            self.assertTrue(any(path == root/'worker/validation/worker/sanitizers.py' for path in seen))
 
     def test_diagnostic_export_has_independent_profile_identity(self):
         with tempfile.TemporaryDirectory() as temporary:

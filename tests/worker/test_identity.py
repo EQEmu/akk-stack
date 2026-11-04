@@ -53,7 +53,7 @@ class Identity(unittest.TestCase):
                 policies = {path for path in seen if str(path).startswith('/etc/')}
                 self.assertEqual(policies, {Path('/etc/systemd/system') / (policy + '@.service'),
                     Path('/etc/systemd/system') / (policy + '.socket'), Path('/etc/apparmor.d') / policy})
-                self.assertEqual(any(path.name == 'sanitizers.py' for path in seen), bool(fields))
+                self.assertEqual(any(path == root / 'worker/validation/worker/sanitizers.py' for path in seen), bool(fields))
             for fields in ({'diagnostic_policy': 'eqemu-validator-asan-v2'},
                     {'diagnostic_profile': 'asan-ubsan-native-v1', 'diagnostic_policy': 'eqemu-validator-asan-v4'},
                     {'diagnostic_profile': 'other'}):
@@ -61,6 +61,30 @@ class Identity(unittest.TestCase):
                 with self.assertRaises(ValueError), patch.object(identity, 'record') as record:
                     identity.identity(root, config, root / 'native', root / 'rust')
                 record.assert_not_called()
+
+    def test_frontend_sanitizer_bytes_bind_with_installed_copy_unchanged(self):
+        import shutil
+        import runtime
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); frontend = root/'frontend'; installed = root/'installed'
+            shutil.copytree(ROOT/'validation', frontend/'validation')
+            shutil.copytree(ROOT/'scripts', frontend/'scripts')
+            for name in runtime.IMPLEMENTATION_FILES:
+                path = installed/name; path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((ROOT/name).read_bytes())
+            policies = root/'etc'
+            for name in ('systemd/system/eqemu-validator@.service',
+                    'systemd/system/eqemu-validator.socket', 'apparmor.d/eqemu-validator'):
+                path = policies/name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'policy')
+            for name in ('base', 'native', 'rust'): (root/name).write_bytes(name.encode())
+            config = root/'config.json'
+            config.write_text(json.dumps(dict(code_dir=str(installed), base_image=str(root/'base'))))
+            with patch.object(identity, 'POLICY_ROOT', policies):
+                original = identity.identity(frontend, config, root/'native', root/'rust')
+                path = frontend/'validation/worker/sanitizers.py'; path.write_bytes(path.read_bytes()+b'\n# frontend-only change\n')
+                self.assertNotEqual(original, identity.identity(frontend, config, root/'native', root/'rust'))
+            self.assertEqual((installed/'validation/worker/sanitizers.py').read_bytes(),
+                (ROOT/'validation/worker/sanitizers.py').read_bytes())
 
     def test_cli_identity_does_not_contact_worker_or_prepare_candidate(self):
         loader = importlib.machinery.SourceFileLoader('candidate_cli', str(ROOT / 'scripts/validate-worker-candidate'))

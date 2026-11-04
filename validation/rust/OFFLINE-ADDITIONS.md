@@ -52,7 +52,11 @@ The full frontend preserves the original default operand exactly:
 It accepts that original digest plus exactly one added digest and byte count:
 `7bc2a72f9b8a3ebcea3dfcb879ab2d5bb0a23d5ab4913e85f9acd728a5ce932e`,
 171284480 bytes. No hash flag, environment override, registry configuration change
-or arbitrary bundle admission is added. Quick/format pins remain original.
+or arbitrary bundle admission is added. Quick defaults to the original pin and permits the reviewed additive bundle with
+`--rust-package additive-v1 --rust-input /absolute/reviewed/rust-inputs.tar`.
+Its frontend, runtime and guest share exact hash/size selections; locked offline
+dependency resolution still rejects incompatible source locks or missing closure.
+Format retains the original pin.
 
 After the parent's final source/package reviews and root selection decision,
 the reviewed frontend can use the existing `--rust-input` operand. The new

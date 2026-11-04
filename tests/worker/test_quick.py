@@ -132,6 +132,44 @@ class QuickSnapshots(unittest.TestCase):
         self.assertNotIn('rust-clippy',calls);self.assertNotIn('rust-tests',calls)
         self.assertIn('rust-clippy',result['skipped_checks']);snapshot.validate_detail(result)
 
+    def test_locked_offline_closure_failures_cannot_pass_or_compile(self):
+        value=self.capture();source=self.extracted(value)
+        for error in ('lock file needs to be updated but --locked was passed','no matching package named missing_crate found'):
+            calls=[]
+            def command(name,args,**kwargs):
+                calls.append(name)
+                if name=='rust-dependencies':
+                    self.assertIn('--locked',args);self.assertIn('--offline',args)
+                    self.assertIs(kwargs['candidate'],False)
+                    raise RuntimeError(error)
+            result=quick_guest.run_checks(source,source/'submodules/vcpkg','/trusted/cargo',value,command)
+            self.assertEqual(result['exit_code'],2)
+            self.assertEqual(result['unavailable_checks'],['rust-dependencies'])
+            self.assertNotIn('rust-clippy',calls);self.assertNotIn('rust-tests',calls)
+
+    def test_guest_admission_accepts_reviewed_records_before_source_preparation(self):
+        value=self.capture();identity={key:snapshot.identity(value)[key] for key in ('base','head','input_snapshot_sha256','recipe_sha256')}
+        marker=self.root/'guest-marker';marker.write_text('nonce')
+        manifest=self.root/'snapshot.json';manifest.write_bytes(snapshot.canonical(value))
+        request_path=self.root/'request.json'
+        def path(name):
+            return {'/opt/eqemu-worker-quick-guest':marker,'/opt/eqemu-worker-nonce':marker,'/opt/eqemu-quick-request.json':request_path,
+                    '/media/eqemu-input':self.root/f'media-{index}','/media/eqemu-input/snapshot.json':manifest}[name]
+        records=[*snapshot.RUST_PACKAGES.values(),dict(bytes=171284480,sha256='f'*64),
+                 dict(snapshot.RUST_PACKAGES['additive-v1'],bytes=171284479)]
+        for index,item in enumerate(records):
+            identity['files']={'rust-inputs.tar':dict(item),'native.iso':dict(bytes=1,sha256=quick_prepare.NATIVE_SHA)}
+            request_path.write_bytes(snapshot.canonical(identity))
+            with (patch.object(quick_guest.os,'geteuid',return_value=0),patch.object(quick_guest,'Path',side_effect=path),
+                  patch.object(quick_guest.build,'WORK',self.root/f'work-{index}'),
+                  patch.object(quick_guest.build,'MEDIA',self.root/f'build-media-{index}'),
+                  patch.object(quick_guest.build,'command'),patch.object(quick_guest.build,'provision',return_value=identity),
+                  patch.object(quick_guest.build,'prepare_source',side_effect=RuntimeError('admitted-stop')) as source,
+                  patch.object(quick_guest.build,'prepare_rust') as cargo,
+                  patch.object(quick_guest.sys,'argv',['guest','nonce']),contextlib.redirect_stdout(io.StringIO())):
+                quick_guest.main()
+            self.assertEqual(source.call_count,1 if index<2 else 0);cargo.assert_not_called()
+
     def test_header_unavailable_does_not_prevent_rust_feedback(self):
         (self.repo/'new.hpp').write_text('opaque header')
         value=self.capture();source=self.extracted(value);calls=[]
@@ -369,6 +407,48 @@ class QuickCLI(unittest.TestCase):
                 self.assertEqual(self.cli.main(['--repo',str(repo),'--base',base,'--expected-input','bad','--output',str(output)]),2)
             exchange.assert_not_called();result=json.loads(output.read_text())
             self.assertEqual(result['input_snapshot_sha256'],result['output_snapshot_sha256']);self.assertFalse(result['vm_started'])
+    def test_cli_submission_passes_named_selection_and_default_to_preparer(self):
+        for name in (None,'original','additive-v1'):
+            with tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);repo,base=source_fixture(root)
+                tool=quick_prepare.tool_identity(ROOT,name or 'original')
+                value=snapshot.capture(repo,base,tool['recipe_sha256'])
+                config=root/'config.json';config.write_text(json.dumps({'socket':'/unused'}))
+                argv=['--repo',str(repo),'--base',base,'--config',str(config),'--output',str(root/'result.json'),
+                      '--expected-input',snapshot.identity(value)['input_snapshot_sha256']]
+                if name:argv+=['--rust-package',name]
+                with (patch.object(self.cli,'prepare',return_value={'operation':'quick'}) as prepare,
+                      patch.object(self.cli,'exchange',side_effect=[{'exit_code':0},{'exit_code':0,'timings':{}}]) as exchange,
+                      patch.object(snapshot,'validate_result'),contextlib.redirect_stdout(io.StringIO())):
+                    self.assertEqual(self.cli.main(argv),0)
+                self.assertEqual(prepare.call_args.args[-1],name or 'original')
+                self.assertEqual(exchange.call_count,2)
+
+    def test_preparation_stages_only_selected_reviewed_package(self):
+        import inputs
+        for name,item in snapshot.RUST_PACKAGES.items():
+            with tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);repo,base=source_fixture(root);value=snapshot.capture(repo,base,'d'*64)
+                value['gitlinks']=json.loads((ROOT/'validation/profile.json').read_text())['sources']['eqemu']['gitlinks']
+                rust=root/'rust.tar';native=root/'native.iso';output=root/'payload.iso'
+                real_record=quick_prepare.record
+                def record(path):
+                    if Path(path)==rust:return dict(item)
+                    if Path(path)==native:return dict(bytes=1,sha256=quick_prepare.NATIVE_SHA)
+                    return real_record(path)
+                def archive(repo,value,path):path.write_bytes(b'source data')
+                def package(args,**kwargs):output.write_bytes(b'ISO')
+                with (patch.object(quick_prepare,'record',side_effect=record),patch.object(snapshot,'archive',side_effect=archive),
+                      patch.object(snapshot,'capture',return_value=value),patch.object(inputs,'GitTree') as tree,
+                      patch.object(inputs,'verify_archive'),patch.object(quick_prepare.subprocess,'run',side_effect=package)):
+                    tree.return_value.inventory.return_value=([],{})
+                    tree.return_value.archive.side_effect=lambda commit,path:path.write_bytes(b'dependency')
+                    request=quick_prepare.prepare(repo,value,root,native,rust,output,name)
+                    self.assertEqual(request['files']['rust-inputs.tar'],item)
+                    other='additive-v1' if name=='original' else 'original'
+                    with self.assertRaisesRegex(ValueError,'pinned quick Rust'):
+                        quick_prepare.prepare(repo,value,root,native,rust,root/'wrong.iso',other)
+
     def test_output_refusals_and_public_privacy(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);repo,base=source_fixture(root);target=root/'target';target.mkdir();link=root/'link';link.symlink_to(target)

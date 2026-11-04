@@ -140,8 +140,7 @@ def main():
         identity=build.provision()
         if identity!={key:request[key] for key in ('base','head','input_snapshot_sha256','recipe_sha256','files')}:
             raise ValueError('Quick input identity mismatch')
-        from snapshot import RUST_INPUT_SHA256
-        if identity['files']['rust-inputs.tar']['sha256']!=RUST_INPUT_SHA256 or identity['files']['native.iso']['sha256']!='02e94c23126772a5ca81ac7974661c3010cbdbba8da7647b8ac6cedac6c3cca4':
+        if not snapshot.approved_rust(identity['files']['rust-inputs.tar']) or identity['files']['native.iso']['sha256']!='02e94c23126772a5ca81ac7974661c3010cbdbba8da7647b8ac6cedac6c3cca4':
             raise ValueError('Unapproved quick tool bundle')
         source,registry=build.prepare_source();verify_source(source,value)
         cargo=build.prepare_rust();result['preparation_seconds']=round(time.monotonic()-started,3)

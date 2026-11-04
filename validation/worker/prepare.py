@@ -12,7 +12,7 @@ import inputs
 
 NATIVE_SHA = '02e94c23126772a5ca81ac7974661c3010cbdbba8da7647b8ac6cedac6c3cca4'
 RUST_SHA = '2a0b4a32ad74b3bb49195d43f76ece75166b500004f5b32f868cb20a292bc52f'
-# Full builds only. Quick/format retain their independent original pin.
+# Full builds. Quick has its own explicit reviewed selections; format retains the original pin.
 ADDITIONAL_RUST = {'7bc2a72f9b8a3ebcea3dfcb879ab2d5bb0a23d5ab4913e85f9acd728a5ce932e': 171284480}
 PAYLOAD_LIMIT = 1024**3
 

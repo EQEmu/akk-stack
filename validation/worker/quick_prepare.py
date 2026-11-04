@@ -5,33 +5,35 @@ import subprocess
 import tempfile
 
 from format_prepare import implementation
-from prepare import record, NATIVE_SHA, RUST_SHA
+from prepare import record, NATIVE_SHA
 import quick_snapshot as snapshot
 
 
-def tool_identity(root):
+def tool_identity(root, rust_package='original'):
+    rust = snapshot.RUST_PACKAGES[rust_package]
     names=('scripts/quick-worker-snapshot','validation/worker/quick_snapshot.py','validation/worker/quick_prepare.py',
            'validation/worker/quick_guest.py','validation/worker/build_guest.py','validation/profile.json',
            'validation/rust-toolchain.json','validation/inputs.py','validation/worker/snapshot.py',
            'validation/worker/snapshot_apply.py','validation/worker/prepare.py','validation/worker/format_prepare.py',
            'validation/worker/client.py')
     recipe=snapshot.sha(snapshot.canonical(dict(version=1,files={name:record(root/name)['sha256'] for name in names},
-        native_input_sha256=NATIVE_SHA,rust_input_sha256=RUST_SHA,checks=list(snapshot.CHECKS))))
+        native_input_sha256=NATIVE_SHA,rust_input_sha256=rust['sha256'],checks=list(snapshot.CHECKS))))
     return dict(version=1,scope='working-snapshot-quick-tool',recipe_sha256=recipe,implementation_sha256=implementation(root),
-        rust_input_sha256=RUST_SHA,native_input_sha256=NATIVE_SHA,checks=list(snapshot.CHECKS),
+        rust_input_sha256=rust['sha256'],native_input_sha256=NATIVE_SHA,checks=list(snapshot.CHECKS),
         limits=dict(snapshot_bytes=snapshot.SOURCE_LIMIT,snapshot_files=snapshot.FILE_COUNT,file_bytes=snapshot.FILE_LIMIT,
                     manifest_bytes=snapshot.MANIFEST_LIMIT,result_bytes=snapshot.RESULT_LIMIT,worker_seconds=3600,
                     client_seconds=3630,cleanup_grace_seconds=30))
 
 
-def prepare(repo,value,websocketpp,native,rust,output):
+def prepare(repo,value,websocketpp,native,rust,output,rust_package='original'):
     import sys
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
     from inputs import GitTree, verify_archive
     profile=json.loads((Path(__file__).resolve().parents[1]/'profile.json').read_text())
     if value['gitlinks']!=profile['sources']['eqemu']['gitlinks']:
         raise ValueError('Quick snapshot requires unsupported native submodule inputs')
-    for path,wanted in ((native,NATIVE_SHA),(rust,RUST_SHA)):
+    if record(rust) != snapshot.RUST_PACKAGES[rust_package]:raise ValueError('Missing/changed pinned quick Rust input')
+    for path,wanted in ((native,NATIVE_SHA),):
         if record(path)['sha256']!=wanted:raise ValueError('Missing/changed pinned quick input: '+str(path))
     with tempfile.TemporaryDirectory(prefix='eqemu-quick-payload-') as tmp:
         root=Path(tmp);archive=root/'eqemu.tar';snapshot.archive(repo,value,archive)

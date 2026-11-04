@@ -257,9 +257,24 @@ class QuickRuntime(unittest.TestCase):
     def request_data(self):
         files={name:dict(bytes=3,sha256='d'*64) for name in ('snapshot.json','eqemu.tar','websocketpp.tar','native.iso','rust-inputs.tar')}
         files['native.iso']['sha256']='02e94c23126772a5ca81ac7974661c3010cbdbba8da7647b8ac6cedac6c3cca4'
-        files['rust-inputs.tar']['sha256']='2a0b4a32ad74b3bb49195d43f76ece75166b500004f5b32f868cb20a292bc52f'
+        files['rust-inputs.tar']=dict(snapshot.RUST_PACKAGES['original'])
         return dict(version=1,operation='quick',base='a'*40,head='b'*40,input_snapshot_sha256='c'*64,recipe_sha256='d'*64,
                     files=files,bytes=3,sha256=snapshot.sha(b'ISO'))
+    def test_reviewed_packages_cross_runtime_boundary_and_wrong_records_refuse(self):
+        for item in snapshot.RUST_PACKAGES.values():
+            request=self.request_data();request['files']['rust-inputs.tar']=dict(item)
+            self.client.sendall(snapshot.canonical(request)+b'\n')
+            with patch.object(runtime,'run_vm',return_value={'exit_code':2}) as run:
+                runtime.request(self.server,self.value)
+                self.assertEqual(run.call_args.kwargs['quick']['files']['rust-inputs.tar'],item)
+        for item in (dict(bytes=171284480,sha256='f'*64),
+                     dict(snapshot.RUST_PACKAGES['additive-v1'],bytes=171284479)):
+            request=self.request_data();request['files']['rust-inputs.tar']=item
+            self.client.sendall(snapshot.canonical(request)+b'\n')
+            with patch.object(runtime,'run_vm') as run,self.assertRaisesRegex(ValueError,'Malformed quick request'):
+                runtime.request(self.server,self.value)
+            run.assert_not_called()
+
     def test_quick_protocol_keeps_payload_and_no_execution_retries(self):
         request=self.request_data();self.client.sendall(snapshot.canonical(request)+b'\nISO')
         def consume(value,connection,**kwargs):
@@ -326,6 +341,24 @@ class QuickCLI(unittest.TestCase):
     def setUp(self):
         loader=importlib.machinery.SourceFileLoader('quick_cli',str(ROOT/'scripts/quick-worker-snapshot'))
         spec=importlib.util.spec_from_loader(loader.name,loader);self.cli=importlib.util.module_from_spec(spec);loader.exec_module(self.cli)
+    def test_named_selection_changes_recipe_and_rejects_unreviewed_names(self):
+        identities=[]
+        for name,item in snapshot.RUST_PACKAGES.items():
+            with patch.object(self.cli,'exchange') as exchange,contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(self.cli.main(['--identity','--rust-package',name]),0)
+            identity=json.loads(out.getvalue());identities.append(identity)
+            self.assertEqual(identity['rust_input_sha256'],item['sha256']);exchange.assert_not_called()
+        self.assertNotEqual(identities[0]['recipe_sha256'],identities[1]['recipe_sha256'])
+        with contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit):
+            self.cli.main(['--identity','--rust-package','unreviewed'])
+        for name in snapshot.RUST_PACKAGES:
+            with tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);rust=root/'rust.tar';rust.write_bytes(b'incomplete')
+                profile=json.loads((ROOT/'validation/profile.json').read_text())
+                with patch.object(quick_prepare.subprocess,'run') as package,self.assertRaisesRegex(ValueError,'pinned quick Rust'):
+                    quick_prepare.prepare(root,dict(gitlinks=profile['sources']['eqemu']['gitlinks']),root,root/'native',rust,root/'out',name)
+                package.assert_not_called()
+
     def test_identity_and_stale_input_never_contact_worker(self):
         with patch.object(self.cli,'exchange') as exchange,patch.object(self.cli,'prepare') as prepare,contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(self.cli.main(['--identity']),0)

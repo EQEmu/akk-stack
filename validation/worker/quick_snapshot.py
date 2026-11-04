@@ -10,6 +10,17 @@ import tempfile
 
 from snapshot import canonical, sha, read_file
 
+# Reviewed immutable package identities, shared by frontend, runtime and guest.
+RUST_PACKAGES = {
+    'original': dict(bytes=171847680, sha256='2a0b4a32ad74b3bb49195d43f76ece75166b500004f5b32f868cb20a292bc52f'),
+    'additive-v1': dict(bytes=171284480, sha256='7bc2a72f9b8a3ebcea3dfcb879ab2d5bb0a23d5ab4913e85f9acd728a5ce932e'),
+}
+
+
+def approved_rust(item):
+    return item in RUST_PACKAGES.values()
+
+
 SOURCE_LIMIT = 256 * 1024**2
 FILE_LIMIT = 16 * 1024**2
 FILE_COUNT = 10000

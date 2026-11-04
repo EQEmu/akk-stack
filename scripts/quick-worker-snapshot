@@ -34,6 +34,7 @@ def main(argv=None):
     mode=parser.add_mutually_exclusive_group();mode.add_argument('--identity',action='store_true');mode.add_argument('--snapshot-identity',action='store_true')
     parser.add_argument('--expected-input');parser.add_argument('--output',type=Path);parser.add_argument('--config',type=Path,default=CONFIG)
     parser.add_argument('--websocketpp',type=Path);parser.add_argument('--input-store',type=Path,default=Path.home()/'.local/state/eqemu-vm-proof')
+    parser.add_argument('--rust-package',choices=tuple(snapshot.RUST_PACKAGES),default='original')
     parser.add_argument('--rust-input',type=Path,default=Path.home()/'.local/state/eqemu-rust-validator/inputs/bundle-1.99.0-cxx194/rust-inputs.tar')
     args=parser.parse_args(argv)
     if not args.identity and not args.base:parser.error('--base is required')
@@ -43,7 +44,7 @@ def main(argv=None):
         print(json.dumps(dict(version=1,scope='working-snapshot-quickcheck',advisory=True,exit_code=2,error='Output artifact path rejected')));return 2
     value=tool=None;submitted=False;started=time.monotonic()
     try:
-        tool=tool_identity(ROOT)
+        tool=tool_identity(ROOT,args.rust_package)
         if args.identity:print(json.dumps(tool,separators=(',',':')));return 0
         value=snapshot.capture(args.repo,args.base,tool['recipe_sha256'])
         if args.snapshot_identity:print(json.dumps(snapshot.identity(value),separators=(',',':')));return 0
@@ -53,7 +54,7 @@ def main(argv=None):
         with tempfile.TemporaryDirectory(prefix='eqemu-quick-client-') as tmp:
             output=Path(tmp)/'payload.iso'
             request=prepare(args.repo,value,args.websocketpp or args.repo/'submodules/websocketpp',
-                args.input_store/'build-inputs-20260925-v3/build-inputs.iso',args.rust_input,output)
+                args.input_store/'build-inputs-20260925-v3/build-inputs.iso',args.rust_input,output,args.rust_package)
             if snapshot.capture(args.repo,args.base,tool['recipe_sha256'])!=value:raise ValueError('Quick input changed before submission')
             submitted=True;response=exchange(config['socket'],request,output)
         snapshot.validate_result(response,value,tool)

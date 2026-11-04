@@ -84,9 +84,10 @@ the user-owned pinned package. No root-owned publication/install is proposed.
 If the operator requires a root-owned destination, stop for root decision
 `2f10d806`; no privileged publishing commands or bypass are provided here.
 PR29 identity fixes at `75cb6f9696cb653d8c312f59d1d52c4d5b895dc4` are merged
-into this branch without rewriting the original preparation commit. The fixed
-identity implementation remains byte-identical to that base. Fresh complete-delta
-reviews must cover the combined successor. The parent owns two independent final
+into this branch without rewriting the original preparation commit. Historical
+installed-selection rules remain strict and independent of the frontend identity
+closure, which R1 intentionally expanded. Fresh complete-delta reviews must cover
+the combined successor. The parent owns two independent final
 reviews, root decision,
 admission and the sole ordinary launch. Recheck the final source lock if the
 selected Server changes. Existing runtime routes, staging and bundles stay intact.

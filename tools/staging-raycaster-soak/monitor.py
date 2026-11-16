@@ -239,8 +239,14 @@ class Observer:
         result['host_available_bytes'] = int(mem['MemAvailable'].split()[0])*1024
         require(result['host_available_bytes'] >= c['limits']['host_available_bytes'], 'host_memory_limit')
         require(digest(c['health_script']) == c['health_sha256'], 'health_script_changed')
-        health = command([sys.executable, '-I', c['health_script']], timeout=20)
-        result['health'] = {'exit': 0, 'output_bytes': len(health)}  # Never retain health output.
+        container_health = '/home/eqemu/server/bin/staging-health.py'
+        observed = command(['docker', 'exec', CONTAINERS[0], 'sha256sum', container_health]).decode().split()
+        require(observed and observed[0] == c['health_sha256'], 'container_health_script_changed')
+        health = command(['docker', 'exec', CONTAINERS[0], 'python3', '-I', container_health], timeout=20)
+        ready = json.loads(health)
+        require(ready.get('ready') is True and ready.get('zones') == c['expected_zones']
+                and {'qeynos2', 'poknowledge'} <= set(ready.get('static_zones', [])), 'native_readiness')
+        result['health'] = {'ready': True, 'zones': ready['zones'], 'output_bytes': len(health)}
         self.check(result)
         self.previous = result
         if self.baseline is None:
@@ -281,7 +287,7 @@ def run(c, out, observer=None, clock=time.monotonic, sleep=time.sleep):
             result = {'index': index, 'complete': False}
             target = min(start+index*INTERVAL, deadline)
             sleep(max(0, target-clock()))
-            require(clock() <= deadline+90, 'deadline_overrun')
+            require(clock() <= target+90, 'sample_gap')
             result = {'index': index, 'wall_time': time.time(), 'complete': False}
             remaining = start + 48*3600 - clock()
             require(remaining > 0, 'hard_48h_deadline')

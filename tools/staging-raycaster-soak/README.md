@@ -7,11 +7,13 @@ worklog `2026-11-15-rust-raycaster-staging-soak.md`. No live validation was perf
 
 The Python standard-library monitor queries exactly
 `eqemu-staging-eqemu-server-1` and `eqemu-staging-mariadb-1` with read-only Docker
-inspect/top. It never calls Docker exec/start/stop, SQL, SSH, a world console or
-player commands. The only extra executable is the parent's reviewed existing
-`bin/staging-health.py`, invoked with Python `-I` and no arguments. Parent must
-confirm that script is read-only and works with this invocation. Its source was
-not available in the supplied worktrees. Its hash is checked every sample; its
+inspect/top. It never starts/stops monitored services or calls SQL, SSH or player commands.
+Two fixed Docker exec calls verify and run the existing read-only readiness script
+inside the server container, where its loopback world console is reachable. The only extra executable is the parent's reviewed existing
+`bin/staging-health.py`, invoked with Python `-I` and no arguments inside that fixed container. Parent read the live script: it uses the container-local world console to query
+zone readiness. Host execution would target the wrong loopback namespace. Both
+host-visible and container-visible bytes must match the declared hash. Ready,
+zone count and the two static zone names are validated, not just exit status. Its hash is checked every sample; its
 output is drained under a cap and discarded, never stored or printed.
 
 ## Parent preparation and invocation
@@ -47,7 +49,7 @@ Exact invocation, after replacing deployment paths:
 ```
 
 Use a new output directory for every attempt. Default example duration is 24h;
-manifest duration must be finite, positive and <=48h. Samples run at monotonic
+manifest duration must be finite, positive and <=48h. Samples refuse lateness over90seconds and run at monotonic
 five-minute targets with an endpoint sample, at most 577 total. Each sample has a
 90s wall-time alarm, each subprocess a 20s timeout and 1 MiB pipe cap. Each
 executable hash reads at most 512 MiB; unchanged executable identities reuse hashes.

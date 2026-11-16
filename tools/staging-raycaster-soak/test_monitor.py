@@ -135,7 +135,7 @@ class TestMonitor(unittest.TestCase):
                     out.write('summary.json', {})
 
     def test_full_sample_mocked_readonly_sources_and_faults(self):
-        for fault in (None, 'oom', 'unhealthy', 'memory', 'rss', 'hash', 'health_exit'):
+        for fault in (None, 'oom', 'unhealthy', 'memory', 'rss', 'hash', 'health_exit', 'health_hash', 'not_ready', 'wrong_zones'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as d, ExitStack() as stack:
                 c = manifest()
                 log = Path(d)/'native.log'
@@ -146,10 +146,14 @@ class TestMonitor(unittest.TestCase):
                 commands = []
                 def command(argv, **kwargs):
                     commands.append(argv)
-                    if argv[0] != 'docker':
+                    if argv[:2] == ['docker', 'exec']:
+                        self.assertEqual(argv[2], m.CONTAINERS[0])
+                        if argv[3] == 'sha256sum':
+                            return (('b' if fault == 'health_hash' else 'a')*64 + '  /home/eqemu/server/bin/staging-health.py').encode()
+                        self.assertEqual(argv[3:], ['python3', '-I', '/home/eqemu/server/bin/staging-health.py'])
                         if fault == 'health_exit':
                             raise m.Nonpass('command_exit')
-                        return b'private health output'
+                        return json.dumps({'ready': fault != 'not_ready', 'zones': 7 if fault == 'wrong_zones' else c['expected_zones'], 'static_zones': ['qeynos2','poknowledge']}).encode()
                     if argv[1] == 'top':
                         return b'PID COMMAND\n101 world\n102 zone\n'
                     state = dict(Running=True, OOMKilled=fault == 'oom', Restarting=False,
@@ -185,12 +189,25 @@ class TestMonitor(unittest.TestCase):
                 else:
                     obs.sample(result)
                     self.assertNotIn('private', m.encode(result).decode())
-                    self.assertEqual(result['health']['exit'], 0)
+                    self.assertTrue(result['health']['ready'])
                     self.assertEqual(len(result['processes']), 2)
-                    self.assertTrue(all(a[1] in ('inspect', 'top') for a in commands if a[0] == 'docker'))
+                    self.assertTrue(all(a[1] in ('inspect', 'top', 'exec') for a in commands if a[0] == 'docker'))
                     inspect = next(a for a in commands if a[0] == 'docker' and a[1] == 'inspect')
                     self.assertNotIn('{{json .State}}', inspect)
                     self.assertNotIn('Env', ''.join(inspect))
+
+    def test_delayed_sample_cannot_complete_soak(self):
+        with tempfile.TemporaryDirectory() as d:
+            now = [0]
+            def sleep(seconds):
+                now[0] += seconds + 91
+            out = m.Artifacts(Path(d)/'run')
+            with patch.object(signal, 'alarm'):
+                rc = m.run(manifest(), out, object(), lambda: now[0], sleep)
+            summary = json.loads((out.root/'summary.json').read_text())
+            self.assertEqual(rc, 1)
+            self.assertEqual(summary['samples'], 0)
+            self.assertEqual(summary['reason'], 'sample_gap')
 
     def test_stop_signal_retains_abort_summary(self):
         with tempfile.TemporaryDirectory() as d:

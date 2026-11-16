@@ -1,0 +1,24 @@
+# Example only. Parent reviews paths, manifest, access and limits before installation.
+[Unit]
+Description=Finite read-only staging raycaster observation
+
+[Service]
+Type=exec
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 -I -B /opt/eqemu-soak/monitor.py --manifest /etc/eqemu-soak/manifest.json --output /var/lib/eqemu-soak/run-UNIQUE-ID
+Restart=no
+# Leaves 30 seconds for a NONPASS receipt before the hard 48-hour ceiling.
+RuntimeMaxSec=47h59min
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+KillMode=control-group
+MemoryMax=256M
+CPUQuota=10%
+TasksMax=32
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/eqemu-soak
+StandardOutput=null
+StandardError=journal

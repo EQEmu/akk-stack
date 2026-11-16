@@ -1,0 +1,8 @@
+# Optional one-shot timer. Never enable a recurring timer or restart failed runs.
+[Unit]
+Description=Start one finite owned staging observation
+
+[Timer]
+OnActiveSec=1s
+Unit=eqemu-raycaster-soak.service
+RemainAfterElapse=no

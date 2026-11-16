@@ -1,0 +1,24 @@
+{
+  "release": "PARENT_REVIEWED_RELEASE_ID",
+  "source": "1bcb08a994568fef84516f94614e463703eca574",
+  "backend": "ON",
+  "world_sha256": "1a922b6a7b56e052d27e4a841a9e1a02b67779c472860e54897d15eab0b70dec",
+  "zone_sha256": "825751d410c661c76b24f97e8e8e28ab495cdbb14116b48e115ffd8181a8490b",
+  "duration_hours": 24,
+  "expected_zones": 3,
+  "baseline_reference": "PARENT_BASELINE_RECEIPT_ID",
+  "health_script": "/ABSOLUTE/REVIEWED/bin/staging-health.py",
+  "health_sha256": "REPLACE_WITH_REVIEWED_HEALTH_SCRIPT_SHA256",
+  "logs": ["/ABSOLUTE/HOST/NATIVE_LOG", "/ABSOLUTE/DOCKER_JSON_LOG"],
+  "disk_paths": ["/", "/ABSOLUTE/LOG_FILESYSTEM", "/ABSOLUTE/OUTPUT_FILESYSTEM"],
+  "limits": {
+    "disk_free_bytes": null,
+    "host_available_bytes": null,
+    "log_growth_bytes": null,
+    "process_rss_bytes": null,
+    "containers": {
+      "eqemu-staging-eqemu-server-1": {"memory_bytes": null, "cpu_cores": null},
+      "eqemu-staging-mariadb-1": {"memory_bytes": null, "cpu_cores": null}
+    }
+  }
+}

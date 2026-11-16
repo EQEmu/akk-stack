@@ -56,7 +56,9 @@ executable hash reads at most 512 MiB; unchanged executable identities reuse has
 The helper checks PID/starttime and executable device/inode/size/mtime each sample,
 world/zone hashes and count, container/image/start identity, cgroup CPU usage,
 current memory, allocation and memory events, process CPU/RSS, host memory and
-filesystem free space. CPU averages do not detect every short spike.
+filesystem free space. Each CPU counter has a monotonic read window; interval checks use the shortest
+possible interval between successive windows, conservatively covering collection
+time. CPU averages do not detect every short spike.
 
 New log bytes only are scanned, at most 1 MiB per file per sample, with a private
 256-byte overlap for split fault words. No native lines or health output are
@@ -74,7 +76,10 @@ the terminal receipt. Private directory mode is 0700 and files are 0600, then
 0400 for exclusive one-time artifacts. No run can resume or overwrite another.
 `manifest.json` freezes inputs; `baseline.json` freezes the first complete sample;
 `samples.jsonl` stores complete samples; `partial.json` retains a failed sample;
-`summary.json` is an exclusive terminal receipt. An initial failed sample has no
+`summary.json` is an exclusive terminal receipt published only after private
+write, permission, fsync and readback checks. Directory-sync failure removes the
+new publication and returns artifact failure. Consumers still require process
+exit0 with PASS; missing receipts are incomplete. An initial failed sample has no
 complete baseline, only partial evidence. Successful prior samples stay intact.
 
 Nonfinite/invalid data, command failure/timeout, unhealthy containers, any observed

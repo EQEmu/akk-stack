@@ -125,6 +125,10 @@ class Artifacts:
         payload = encode(data)
         reserve = 65536 if name != 'summary.json' else 0
         require(self.used + len(payload) <= BUDGET-reserve, 'artifact_budget')
+        if name == 'summary.json':
+            self.terminal(payload)
+            self.used += len(payload)
+            return
         with (self.root/name).open('ab' if append else 'xb') as stream:
             stream.write(payload)
             stream.flush()
@@ -132,6 +136,34 @@ class Artifacts:
         self.used += len(payload)
         if not append:
             (self.root/name).chmod(0o400)
+
+
+    def terminal(self, payload):
+        """Prepare privately; remove our publication if directory sync fails."""
+        pending = self.root/'.summary.pending'
+        final = self.root/'summary.json'
+        published = False
+        directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with pending.open('x+b') as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fchmod(stream.fileno(), 0o400)
+                os.fsync(stream.fileno())
+                stream.seek(0)
+                require(stream.read() == payload, 'terminal_readback')
+            os.fsync(directory)
+            os.link(pending, final)  # Exclusive publication, never replace a receipt.
+            published = True
+            pending.unlink()
+            os.fsync(directory)
+        except Exception:
+            if published:
+                final.unlink()
+            pending.unlink(missing_ok=True)
+            raise
+        finally:
+            os.close(directory)
 
 
 def counters(path):
@@ -209,10 +241,14 @@ class Observer:
             require(cg.resolve().is_relative_to('/sys/fs/cgroup'), 'cgroup_path')
             events = counters(cg/'memory.events')
             require(not any(events.get(k, 0) for k in ('oom', 'oom_kill', 'oom_group_kill')), 'cgroup_oom')
+            cpu_start = time.monotonic()
+            cpu = counters(cg/'cpu.stat')
+            cpu_end = time.monotonic()
             v = {'id': cid, 'image': image, 'pid': pid, 'started': state['StartedAt'],
                  'init_process': process(pid, self.hashes),
                  'restarts': restarts, 'memory_bytes': int(read(cg/'memory.current', 64)),
-                 'memory_events': events, 'cpu': counters(cg/'cpu.stat'),
+                 'memory_events': events, 'cpu': cpu,
+                 'cpu_read_window': [cpu_start, cpu_end],
                  'memory_max': read(cg/'memory.max', 64).decode().strip(),
                  'cpu_max': read(cg/'cpu.max', 64).decode().strip()}
             result['containers'][name] = v
@@ -262,7 +298,8 @@ class Observer:
                 require(v[key] == b['containers'][name][key], 'container_identity_changed')
             require(v['init_process']['identity'] == b['containers'][name]['init_process']['identity'], 'init_identity_changed')
             require(v['memory_events'] == b['containers'][name]['memory_events'], 'memory_pressure_event')
-            elapsed = result['monotonic']-previous['monotonic']
+            # Use the shortest possible counter interval, never a sample-start proxy.
+            elapsed = v['cpu_read_window'][0]-previous['containers'][name]['cpu_read_window'][1]
             delta = v['cpu']['usage_usec']-previous['containers'][name]['cpu']['usage_usec']
             require(elapsed > 0 and delta >= 0, 'invalid_cpu_delta')
             require(delta / 1e6 / elapsed <= self.c['limits']['containers'][name]['cpu_cores'], 'container_cpu_limit')

@@ -31,7 +31,7 @@ def snapshot():
     return {'monotonic': 0, 'processes': [{'identity': [1, 2, 3]}],
             'containers': {n: dict(id='id', image='image', pid=1, started='start',
                                   restarts=0, init_process={'identity': [1, 2, 3]}, memory_max='1000', cpu_max='100000 100000',
-                                  memory_events={'oom': 0}, cpu={'usage_usec': 0})
+                                  memory_events={'oom': 0}, cpu={'usage_usec': 0}, cpu_read_window=[0, 0])
                            for n in m.CONTAINERS}, 'logs': [{'offset': 0}]}
 
 
@@ -91,6 +91,8 @@ class TestMonitor(unittest.TestCase):
         obs.previous = copy.deepcopy(obs.baseline)
         good = snapshot()
         good['monotonic'] = 300
+        for v in good['containers'].values():
+            v['cpu_read_window'] = [300, 300]
         obs.check(good)
         mutations = [lambda s: s['processes'][0]['identity'].append(4),
                      lambda s: s['containers'][m.CONTAINERS[0]].update(restarts=1),
@@ -195,6 +197,39 @@ class TestMonitor(unittest.TestCase):
                     inspect = next(a for a in commands if a[0] == 'docker' and a[1] == 'inspect')
                     self.assertNotIn('{{json .State}}', inspect)
                     self.assertNotIn('Env', ''.join(inspect))
+
+    def test_cpu_counter_window_rejects_sample_start_underestimate(self):
+        obs = m.Observer(manifest())
+        obs.baseline = snapshot()
+        obs.previous = copy.deepcopy(obs.baseline)
+        current = snapshot()
+        current['monotonic'] = 300
+        for name in m.CONTAINERS:
+            obs.previous['containers'][name]['cpu_read_window'] = [40, 40]
+            current['containers'][name]['cpu_read_window'] = [300, 300]
+            current['containers'][name]['cpu']['usage_usec'] = 280000000
+        with self.assertRaisesRegex(m.Nonpass, 'container_cpu_limit'):
+            obs.check(current)
+
+    def test_terminal_fault_never_leaves_pass(self):
+        for fault in ('file_sync', 'chmod', 'directory_sync', 'link'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as d:
+                out = m.Artifacts(Path(d)/'run')
+                calls = [0]
+                original = m.os.fsync
+                def sync(fd):
+                    calls[0] += 1
+                    if fault == 'file_sync' and calls[0] == 1 or fault == 'directory_sync' and calls[0] == 3:
+                        raise OSError('injected')
+                    original(fd)
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(m.os, 'fsync', sync))
+                    if fault == 'chmod':stack.enter_context(patch.object(m.os, 'fchmod', side_effect=OSError('injected')))
+                    if fault == 'link':stack.enter_context(patch.object(m.os, 'link', side_effect=OSError('injected')))
+                    with self.assertRaises(OSError):
+                        out.write('summary.json', {'status':'PASS'})
+                self.assertFalse((out.root/'summary.json').exists())
+                self.assertFalse((out.root/'.summary.pending').exists())
 
     def test_delayed_sample_cannot_complete_soak(self):
         with tempfile.TemporaryDirectory() as d:

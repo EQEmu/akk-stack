@@ -243,7 +243,7 @@ class TestMonitor(unittest.TestCase):
                     if fault == 'chmod':stack.enter_context(patch.object(m.os, 'fchmod', side_effect=OSError('injected')))
                     if fault == 'link':stack.enter_context(patch.object(m.os, 'link', side_effect=OSError('injected')))
                     with self.assertRaises(OSError):
-                        out.write('summary.json', {'status':'PASS'})
+                        out.write('summary.json', {'status':'PASS_WITH_LOG_COVERAGE_GAP'})
                 self.assertFalse((out.root/'summary.json').exists())
                 self.assertFalse((out.root/'.summary.pending').exists())
 
@@ -385,6 +385,27 @@ class TestRotationContract(unittest.TestCase):
             with self.assertRaisesRegex(m.Nonpass,'log_contract'):m.config(p)
             c=manifest();c['logs']=['/wrong/native.log'];p.write_text(json.dumps(c))
             with self.assertRaisesRegex(m.Nonpass,'fixed_log'):m.config(p)
+
+    def test_archive_changed_after_its_read_refuses_whole_snapshot(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'log';p.write_bytes(b'base\n');archive=Path(str(p)+'.1');archive.write_bytes(b'old\n')
+            real=os.fstat;calls=[0]
+            def mutate(fd):
+                st=real(fd)
+                if os.readlink('/proc/self/fd/'+str(fd))==str(p):
+                    calls[0]+=1
+                    if calls[0]==2:
+                        with archive.open('ab') as f:f.write(b'changed')
+                return st
+            with patch.object(m.os,'fstat',side_effect=mutate),self.assertRaisesRegex(m.Nonpass,'unstable_archive'):m.log_sample(p,None)
+
+    def test_policy_hash_checked_even_with_safe_metadata(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'policy';p.write_bytes(b'synthetic harmless policy\n');st=p.stat();digest=m.hashlib.sha256(p.read_bytes()).hexdigest()
+            safe=SimpleNamespace(st_mode=st.st_mode,st_uid=0,st_dev=st.st_dev,st_ino=st.st_ino,st_size=st.st_size,st_mtime_ns=st.st_mtime_ns)
+            with patch.object(m,'POLICY_PATH',str(p)),patch.object(m.os,'fstat',return_value=safe):
+                with patch.object(m,'POLICY_SHA',digest):self.assertEqual(m.verify_policy(),digest)
+                with self.assertRaisesRegex(m.Nonpass,'policy_changed'):m.verify_policy()
 
     def test_completed_gap_is_scoped_not_plain_pass_and_no_end_eligibility(self):
         with tempfile.TemporaryDirectory() as d:

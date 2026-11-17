@@ -206,7 +206,7 @@ def verify_policy():
         require(stat.S_ISREG(st.st_mode) and st.st_uid == 0 and not st.st_mode & 0o022, 'unsafe_log_policy')
         raw = stream.read(8193)
         require(len(raw) <= 8192 and hashlib.sha256(raw).hexdigest() == POLICY_SHA, 'log_policy_changed')
-        after = p.stat()
+        after = p.lstat()
         require((st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns) ==
                 (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns), 'unstable_log_policy')
     return POLICY_SHA
@@ -234,7 +234,7 @@ def log_sample(path, previous, budget=None):
             stream.close()
             raise
     def stable(p, stream, before):
-        require(signature(os.fstat(stream.fileno())) == signature(before) == signature(p.stat()), 'unstable_log_read')
+        require(signature(os.fstat(stream.fileno())) == signature(before) == signature(p.lstat()) and p.absolute() == p.resolve(), 'unstable_log_read')
     allowed = {path.name+x for x in LOG_CONTRACT['archive_suffixes']}
     for count,entry in enumerate(path.parent.iterdir(),1):
         require(count <= 4096, 'log_directory_bound')
@@ -260,7 +260,7 @@ def log_sample(path, previous, budget=None):
             stable(p,stream,st)
         archives[suffix] = {'identity':[st.st_dev,st.st_ino], 'bytes':st.st_size,
                             'sha256':hashlib.sha256(raw).hexdigest(),
-                            'content_sha256':hashlib.sha256(data).hexdigest(), '_data':data}
+                            'content_sha256':hashlib.sha256(data).hexdigest(), '_data':data, '_stat':signature(st)}
     expected = LOG_CONTRACT['archive_suffixes'][:len(archives)]
     require(list(archives) == expected, 'archive_generation_gap')
     stream,st = opened(path)
@@ -302,6 +302,9 @@ def log_sample(path, previous, budget=None):
         require(BAD.search(tail+new) is None, 'native_log_fault_or_nonfinite')
         stream.seek(max(0,st.st_size-256));anchor = consume(stream.read(min(256,st.st_size)))
         stable(path,stream,st)
+    require([suffix for suffix in LOG_CONTRACT['archive_suffixes'] if Path(str(path)+suffix).exists()] == list(archives), 'unstable_archive_inventory')
+    for suffix,row in archives.items():
+        require(signature(Path(str(path)+suffix).lstat()) == row['_stat'], 'unstable_archive_snapshot')
     public_archives = {k:{x:y for x,y in v.items() if not x.startswith('_')} for k,v in archives.items()}
     return {'identity':identity,'offset':st.st_size,'new_bytes':len(new),
             'observed_start':offset,'observed_end':st.st_size,'observed_sha256':hashlib.sha256(new).hexdigest(),

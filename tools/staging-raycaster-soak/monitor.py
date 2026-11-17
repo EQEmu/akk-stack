@@ -236,10 +236,15 @@ def log_sample(path, previous, budget=None):
     def stable(p, stream, before):
         require(signature(os.fstat(stream.fileno())) == signature(before) == signature(p.lstat()) and p.absolute() == p.resolve(), 'unstable_log_read')
     allowed = {path.name+x for x in LOG_CONTRACT['archive_suffixes']}
-    for count,entry in enumerate(path.parent.iterdir(),1):
-        require(count <= 4096, 'log_directory_bound')
-        if entry.name.startswith(path.name+'.'):
-            require(entry.name in allowed, 'unexpected_archive_name')
+    def inventory_names():
+        names = set()
+        for count,entry in enumerate(path.parent.iterdir(),1):
+            require(count <= 4096, 'log_directory_bound')
+            if entry.name.startswith(path.name+'.'):
+                require(entry.name in allowed, 'unexpected_archive_name')
+                names.add(entry.name)
+        return names
+    names = inventory_names()
     archives = {}
     for suffix in LOG_CONTRACT['archive_suffixes']:
         p = Path(str(path)+suffix)
@@ -257,6 +262,7 @@ def log_sample(path, previous, budget=None):
                     data = consume(expanded.read(budget[0]+1))
             else:
                 data = raw
+            require(BAD.search(data) is None, 'native_log_fault_or_nonfinite')
             stable(p,stream,st)
         archives[suffix] = {'identity':[st.st_dev,st.st_ino], 'bytes':st.st_size,
                             'sha256':hashlib.sha256(raw).hexdigest(),
@@ -273,7 +279,9 @@ def log_sample(path, previous, budget=None):
         if previous and not rotation:
             old_anchor = previous['_anchor']
             stream.seek(max(0,offset-len(old_anchor)))
-            require(consume(stream.read(len(old_anchor))) == old_anchor, 'log_prefix_changed')
+            verified = consume(stream.read(len(old_anchor)))
+            require(BAD.search(verified) is None, 'native_log_fault_or_nonfinite')
+            require(verified == old_anchor, 'log_prefix_changed')
         tail = previous.get('_tail',b'') if previous else b''
         if previous:
             require(identity == previous['identity'], 'unexpected_log_replacement')
@@ -301,7 +309,9 @@ def log_sample(path, previous, budget=None):
         require(len(new) == st.st_size-offset, 'log_short_read')
         require(BAD.search(tail+new) is None, 'native_log_fault_or_nonfinite')
         stream.seek(max(0,st.st_size-256));anchor = consume(stream.read(min(256,st.st_size)))
+        require(BAD.search(anchor) is None, 'native_log_fault_or_nonfinite')
         stable(path,stream,st)
+    require(inventory_names() == names, 'unstable_archive_inventory')
     require([suffix for suffix in LOG_CONTRACT['archive_suffixes'] if Path(str(path)+suffix).exists()] == list(archives), 'unstable_archive_inventory')
     for suffix,row in archives.items():
         require(signature(Path(str(path)+suffix).lstat()) == row['_stat'], 'unstable_archive_snapshot')
@@ -310,7 +320,7 @@ def log_sample(path, previous, budget=None):
             'observed_start':offset,'observed_end':st.st_size,'observed_sha256':hashlib.sha256(new).hexdigest(),
             'visible_footprint_bytes':st.st_size+sum(x['bytes'] for x in archives.values()),
             'archives':public_archives,'rotation':event,'coverage_gap':bool(event) or bool(previous and previous['coverage_gap']),
-            '_tail':(tail+new)[-256:],'_anchor':anchor,'_sample_time':time.monotonic(),
+            '_tail':anchor,'_anchor':anchor,'_sample_time':time.monotonic(),
             '_archives':public_archives,'_archive_signature':{k:(v['identity'],v['sha256']) for k,v in archives.items()}}
 
 

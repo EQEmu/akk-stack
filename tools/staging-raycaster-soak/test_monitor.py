@@ -77,7 +77,7 @@ class TestMonitor(unittest.TestCase):
     def test_logs_baseline_new_bytes_split_tokens_rotation_backlog(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)/'native.log'
-            p.write_bytes(b'old panic private player content\n')
+            p.write_bytes(b'old private player content\n')
             b = m.log_sample(p, None)
             self.assertEqual(b['new_bytes'], 0)
             with p.open('ab') as f:
@@ -406,6 +406,30 @@ class TestRotationContract(unittest.TestCase):
             with patch.object(m,'POLICY_PATH',str(p)),patch.object(m.os,'fstat',return_value=safe):
                 with patch.object(m,'POLICY_SHA',digest):self.assertEqual(m.verify_policy(),digest)
                 with self.assertRaisesRegex(m.Nonpass,'policy_changed'):m.verify_policy()
+
+    def test_every_observed_plain_or_expanded_content_range_is_scanned(self):
+        for location in ('active','archive','gzip','anchor_split'):
+            with self.subTest(location=location),tempfile.TemporaryDirectory() as d:
+                p=Path(d)/'log';p.write_bytes(b'panic\n' if location=='active' else b'pa' if location=='anchor_split' else b'safe\n')
+                if location in ('archive','gzip'):
+                    Path(str(p)+'.1').write_bytes(b'panic\n' if location=='archive' else b'safe\n')
+                if location=='gzip':Path(str(p)+'.2.gz').write_bytes(gzip.compress(b'panic\n'))
+                if location=='anchor_split':
+                    old=m.log_sample(p,None)
+                    with p.open('ab') as f:f.write(b'nic\n')
+                else:old=None
+                with self.assertRaisesRegex(m.Nonpass,'nonfinite'):m.log_sample(p,old)
+
+    def test_unexpected_archive_appearing_during_read_refuses(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'log';p.write_bytes(b'safe\n');real=os.fstat;calls=[0]
+            def add_archive(fd):
+                st=real(fd)
+                if os.readlink('/proc/self/fd/'+str(fd))==str(p):
+                    calls[0]+=1
+                    if calls[0]==2:Path(str(p)+'.8.gz').write_bytes(b'not permitted')
+                return st
+            with patch.object(m.os,'fstat',side_effect=add_archive),self.assertRaisesRegex(m.Nonpass,'unexpected_archive'):m.log_sample(p,None)
 
     def test_completed_gap_is_scoped_not_plain_pass_and_no_end_eligibility(self):
         with tempfile.TemporaryDirectory() as d:

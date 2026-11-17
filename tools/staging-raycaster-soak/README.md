@@ -75,14 +75,17 @@ writable. Before/after read identity/size/timestamps must be stable. Missing act
 files, archive-generation holes, malformed gzip, unexpected replacements or
 unverifiable transitions fail closed.
 
-Normal append scans only observed new bytes, with a private256-byte tail for
-split BAD words. A same-inode shrink or changed archive inventory requires a new
+Every plaintext range actually read is scanned for BAD/nonfinite/query-failure
+patterns, including preexisting archives and baseline/verification anchors. A
+private256-byte tail catches split BAD words across continuous append reads. A same-inode shrink or changed archive inventory requires a new
 `.1`, matching prior offset anchor and the expected archive content-generation
 shift. The helper validates compressed archive data/CRC with bounded expansion;
 compressed bytes, expanded bytes, active reads and anchors share **one1MiB
 budget per complete sample across all four families**, not a new cap per archive.
 Backlog, malformed/oversized input, read races or exhaustion fail NONPASS.
-Preexisting content is not reclassified as newly generated errors.
+A matching error in preexisting content also fails the observation. The receipt
+does not classify that content as newly generated. Directory names are checked
+again after the reads; a new unexpected suffix fails the entire sample.
 
 A policy-consistent copytruncate is an explicit event recording the observation
 window, old offset, available archive bytes and exact observed spans/counts/hashes.

@@ -2,6 +2,7 @@
 """Bounded staging observer. No runtime mutation or automatic recovery."""
 import argparse
 import hashlib
+import gzip
 import json
 import math
 import os
@@ -20,6 +21,17 @@ CAP = 1024 * 1024
 INTERVAL = 300
 SHA = re.compile(r'[0-9a-f]{64}')
 BAD = re.compile(rb'\b(?:nan|[-+]?inf(?:inity)?|panic|segfault|oom|assertion failed|query fail(?:ed|ure)|failed query|addresssanitizer|runtime error)\b', re.I)
+
+LOG_ROOT = '/srv/eqemu-staging/state/server/logs/'
+LOG_PATHS = (LOG_ROOT+'world_29.log', LOG_ROOT+'zone/poknowledge_version_0_inst_id_0_port_0_40.log',
+             LOG_ROOT+'zone/qeynos2_version_0_inst_id_0_port_0_41.log', LOG_ROOT+'zone/zone_162.log')
+POLICY_PATH = '/etc/logrotate.d/eqemu-staging'
+POLICY_SHA = '908247ab7494a776b017c23caa121c02a95ffba61fb5cb94164bb95501198478'
+LOG_CONTRACT = {'version':'copytruncate-visible-footprint-v1', 'policy_path':POLICY_PATH,
+                'policy_sha256':POLICY_SHA, 'growth_metric':'visible_on_disk_footprint_high_water_increase',
+                'content_claim':'observed_bytes_only', 'continuity':'UNPROVEN',
+                'archive_suffixes':['.1']+['.'+str(i)+'.gz' for i in range(2,8)],
+                'owner_uid':1000, 'owner_gid':1000, 'sample_read_expanded_budget_bytes':CAP}
 
 
 class Nonpass(Exception):
@@ -96,6 +108,8 @@ def config(path):
     require(Path(c['health_script']).is_absolute() and Path(c['health_script']).name == 'staging-health.py', 'health_path')
     require(0 < number(c['duration_hours']) <= 48, 'duration_limit')
     require(len(c['baseline_reference']) in range(1, 257), 'baseline_reference_required')
+    require(c.get('log_observation') == LOG_CONTRACT, 'log_contract_required')
+    require(c['logs'] == list(LOG_PATHS), 'fixed_log_paths_required')
     require(len(c['logs']) in range(1, 33), 'log_count')
     require(len(set(c['logs'])) == len(c['logs']), 'duplicate_logs')
     for p in c['logs']:
@@ -185,23 +199,116 @@ def process(pid, hashes):
             'rss_bytes': int(fields[21])*os.sysconf('SC_PAGE_SIZE')}
 
 
-def log_sample(path, previous):
-    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), 'rb') as stream:
-        s = os.fstat(stream.fileno())
-        require(stat.S_ISREG(s.st_mode), 'log_not_regular')
-        identity = [s.st_dev, s.st_ino]
-        offset = s.st_size if previous is None else previous['offset']
+def verify_policy():
+    p = Path(POLICY_PATH)
+    with os.fdopen(os.open(p,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW),'rb') as stream:
+        st = os.fstat(stream.fileno())
+        require(stat.S_ISREG(st.st_mode) and st.st_uid == 0 and not st.st_mode & 0o022, 'unsafe_log_policy')
+        raw = stream.read(8193)
+        require(len(raw) <= 8192 and hashlib.sha256(raw).hexdigest() == POLICY_SHA, 'log_policy_changed')
+        after = p.stat()
+        require((st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns) ==
+                (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns), 'unstable_log_policy')
+    return POLICY_SHA
+
+
+def log_sample(path, previous, budget=None):
+    """Only fixed policy archives; rotation is an explicit content gap, never recovery."""
+    budget = [CAP] if budget is None else budget
+    path = Path(path)
+    def consume(raw):
+        budget[0] -= len(raw)
+        require(budget[0] >= 0, 'log_scan_backlog')
+        return raw
+    def signature(st):
+        return [st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns,st.st_ctime_ns]
+    def opened(p):
+        require(p.absolute() == p.resolve(), 'log_path_alias')
+        stream = os.fdopen(os.open(p,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW),'rb')
+        try:
+            st = os.fstat(stream.fileno())
+            require(stat.S_ISREG(st.st_mode), 'log_not_regular')
+            require(st.st_uid == 1000 and st.st_gid == 1000 and st.st_nlink == 1 and not st.st_mode & 0o022, 'unsafe_log_owner')
+            return stream,st
+        except BaseException:
+            stream.close()
+            raise
+    def stable(p, stream, before):
+        require(signature(os.fstat(stream.fileno())) == signature(before) == signature(p.stat()), 'unstable_log_read')
+    allowed = {path.name+x for x in LOG_CONTRACT['archive_suffixes']}
+    for count,entry in enumerate(path.parent.iterdir(),1):
+        require(count <= 4096, 'log_directory_bound')
+        if entry.name.startswith(path.name+'.'):
+            require(entry.name in allowed, 'unexpected_archive_name')
+    archives = {}
+    for suffix in LOG_CONTRACT['archive_suffixes']:
+        p = Path(str(path)+suffix)
+        if not p.exists():
+            require(not p.is_symlink(), 'archive_alias')
+            continue
+        stream,st = opened(p)
+        with stream:
+            require(st.st_size <= budget[0], 'archive_read_budget')
+            raw = consume(stream.read(st.st_size+1))
+            require(len(raw) == st.st_size, 'archive_short_read')
+            if suffix.endswith('.gz'):
+                import io
+                with gzip.GzipFile(fileobj=io.BytesIO(raw)) as expanded:
+                    data = consume(expanded.read(budget[0]+1))
+            else:
+                data = raw
+            stable(p,stream,st)
+        archives[suffix] = {'identity':[st.st_dev,st.st_ino], 'bytes':st.st_size,
+                            'sha256':hashlib.sha256(raw).hexdigest(),
+                            'content_sha256':hashlib.sha256(data).hexdigest(), '_data':data}
+    expected = LOG_CONTRACT['archive_suffixes'][:len(archives)]
+    require(list(archives) == expected, 'archive_generation_gap')
+    stream,st = opened(path)
+    with stream:
+        identity = [st.st_dev,st.st_ino]
+        offset = st.st_size if previous is None else previous['offset']
+        changed = previous is not None and {k:(v['identity'],v['sha256']) for k,v in archives.items()} != previous['_archive_signature']
+        rotation = previous is not None and (st.st_size < offset or changed)
+        event = None
+        if previous and not rotation:
+            old_anchor = previous['_anchor']
+            stream.seek(max(0,offset-len(old_anchor)))
+            require(consume(stream.read(len(old_anchor))) == old_anchor, 'log_prefix_changed')
+        tail = previous.get('_tail',b'') if previous else b''
         if previous:
-            require(identity == previous['identity'] and s.st_size >= offset, 'log_rotated_or_truncated')
-        require(s.st_size-offset <= CAP, 'log_scan_backlog')
-        stream.seek(offset)
-        new = stream.read(s.st_size-offset)
-        require(len(new) == s.st_size-offset, 'log_short_read')
-    # Carry the last 256 bytes privately so split error tokens cannot disappear.
-    combined = (previous.get('_tail', b'') if previous else b'') + new
-    require(BAD.search(combined) is None, 'native_log_fault_or_nonfinite')
-    return {'identity': identity, 'offset': s.st_size, 'new_bytes': len(new),
-            '_tail': combined[-256:]}
+            require(identity == previous['identity'], 'unexpected_log_replacement')
+        if rotation:
+            require(changed and '.1' in archives, 'unexpected_log_truncation')
+            old_archives = previous['_archives']
+            require(archives['.1']['identity'] != old_archives.get('.1',{}).get('identity'), 'unexpected_archive_reuse')
+            for index,suffix in enumerate(LOG_CONTRACT['archive_suffixes'][1:],1):
+                prior = old_archives.get(LOG_CONTRACT['archive_suffixes'][index-1])
+                current = archives.get(suffix)
+                require((prior is None) == (current is None), 'unexpected_archive_generation')
+                if prior:require(prior['content_sha256'] == current['content_sha256'], 'archive_content_changed')
+            data = archives['.1']['_data']
+            anchor = previous['_anchor']
+            require(len(data) >= offset and data[max(0,offset-len(anchor)):offset] == anchor, 'archive_prefix_unverified')
+            unread = data[offset:]
+            require(BAD.search(tail+unread) is None, 'native_log_fault_or_nonfinite')
+            event = {'kind':'policy_consistent_copytruncate','old_offset':offset,'archive_available_bytes':len(data),
+                     'archive_unread_observed_bytes':len(unread), 'archive_observed_start':offset,
+                     'archive_observed_end':len(data),'archive_observed_sha256':hashlib.sha256(unread).hexdigest(),'window_monotonic':[previous['_sample_time'],time.monotonic()],
+                     'content_coverage':'GAP_POSSIBLE','no_lost_or_recovered_byte_claim':True}
+            offset,tail = 0,b''  # Never join content across the unproved gap.
+        require(st.st_size-offset <= budget[0], 'log_scan_backlog')
+        stream.seek(offset);new = consume(stream.read(st.st_size-offset))
+        require(len(new) == st.st_size-offset, 'log_short_read')
+        require(BAD.search(tail+new) is None, 'native_log_fault_or_nonfinite')
+        stream.seek(max(0,st.st_size-256));anchor = consume(stream.read(min(256,st.st_size)))
+        stable(path,stream,st)
+    public_archives = {k:{x:y for x,y in v.items() if not x.startswith('_')} for k,v in archives.items()}
+    return {'identity':identity,'offset':st.st_size,'new_bytes':len(new),
+            'observed_start':offset,'observed_end':st.st_size,'observed_sha256':hashlib.sha256(new).hexdigest(),
+            'visible_footprint_bytes':st.st_size+sum(x['bytes'] for x in archives.values()),
+            'archives':public_archives,'rotation':event,'coverage_gap':bool(event) or bool(previous and previous['coverage_gap']),
+            '_tail':(tail+new)[-256:],'_anchor':anchor,'_sample_time':time.monotonic(),
+            '_archives':public_archives,'_archive_signature':{k:(v['identity'],v['sha256']) for k,v in archives.items()}}
 
 
 class Observer:
@@ -211,9 +318,13 @@ class Observer:
         self.logs = {}
         self.baseline = None
         self.previous = None
+        self.log_gap = False
+        self.log_footprint_high_water = 0
 
     def sample(self, result):
         c = self.c
+        policy_sha = verify_policy()
+        result['log_policy_sha256'] = policy_sha
         result.update(monotonic=time.monotonic(), containers={}, processes=[], logs=[])
         for name in CONTAINERS:
             # Whitelist fields at Docker, never receive Config.Env or command lines.
@@ -266,9 +377,18 @@ class Observer:
                         require(proc['rss_bytes'] <= c['limits']['process_rss_bytes'], 'process_memory_limit')
         kinds = [p['kind'] for p in result['processes']]
         require(kinds.count('world') == 1 and kinds.count('zone') == c['expected_zones'], 'world_zone_count')
+        budget = [CAP]
         for i, path in enumerate(c['logs']):
-            self.logs[path] = log_sample(path, self.logs.get(path))
-            result['logs'].append({k: v for k, v in self.logs[path].items() if k != '_tail'})
+            self.logs[path] = log_sample(path, self.logs.get(path),budget)
+            self.log_gap |= self.logs[path]['coverage_gap']
+            result['logs'].append({k:v for k,v in self.logs[path].items() if not k.startswith('_')})
+        footprint = sum(x['visible_footprint_bytes'] for x in result['logs'])
+        self.log_footprint_high_water = max(self.log_footprint_high_water,footprint)
+        baseline = self.baseline['log_footprint']['baseline_bytes'] if self.baseline else footprint
+        result['log_footprint'] = {'metric':LOG_CONTRACT['growth_metric'],'baseline_bytes':baseline,
+            'current_bytes':footprint,'high_water_bytes':self.log_footprint_high_water,
+            'increase_bytes':max(0,self.log_footprint_high_water-baseline)}
+        result['log_coverage'] = 'GAP_POSSIBLE' if self.log_gap else 'SAMPLED_NO_OBSERVED_ROTATION'
         result['disk_free_bytes'] = [os.statvfs(p).f_bavail*os.statvfs(p).f_frsize for p in c['disk_paths']]
         require(min(result['disk_free_bytes']) >= c['limits']['disk_free_bytes'], 'disk_free_limit')
         mem = dict(line.split(':', 1) for line in read('/proc/meminfo', 16384).decode().splitlines())
@@ -303,8 +423,7 @@ class Observer:
             delta = v['cpu']['usage_usec']-previous['containers'][name]['cpu']['usage_usec']
             require(elapsed > 0 and delta >= 0, 'invalid_cpu_delta')
             require(delta / 1e6 / elapsed <= self.c['limits']['containers'][name]['cpu_cores'], 'container_cpu_limit')
-        growth = sum(v['offset']-old['offset'] for v, old in zip(result['logs'], b['logs']))
-        require(growth <= self.c['limits']['log_growth_bytes'], 'log_growth_limit')
+        require(result['log_footprint']['increase_bytes'] <= self.c['limits']['log_growth_bytes'], 'log_growth_limit')
 
 
 def interrupted(signum, frame):
@@ -337,7 +456,8 @@ def run(c, out, observer=None, clock=time.monotonic, sleep=time.sleep):
             out.write('samples.jsonl', result, append=True)
             count += 1
             if target == deadline:
-                status, reason = 'PASS', 'observation_deadline_complete'
+                status = 'PASS_WITH_LOG_COVERAGE_GAP' if getattr(observer,'log_gap',False) else 'PASS'
+                reason = 'resource_health_deadline_complete'
                 break
     except Exception as exc:
         # Fixed reason codes only. Exception messages can contain credentials/logs.
@@ -351,8 +471,15 @@ def run(c, out, observer=None, clock=time.monotonic, sleep=time.sleep):
         signal.alarm(0)
         out.write('summary.json', {'status': status, 'reason': reason, 'samples': count,
                   'elapsed_seconds': clock()-start, 'monitor_only': True,
-                  'abort_receipt': status != 'PASS', 'services_changed': False})
-    return 0 if status == 'PASS' else 1
+                  'resource_health_status':'NONPASS' if status == 'NONPASS' else 'PASS',
+                  'logcoverage':'GAP_POSSIBLE' if getattr(observer,'log_gap',False) else 'SAMPLED_NO_OBSERVED_ROTATION',
+                  'log_continuity':'UNPROVEN','content_claim':'observed_bytes_only',
+                  'growth_metric':LOG_CONTRACT['growth_metric'],
+                  'last_complete_log_footprint':getattr(observer,'previous',None).get('log_footprint') if getattr(observer,'previous',None) else None,
+                  'log_observation_contract':c['log_observation'],
+                  'end_probe_eligible':False,'scope':'resource_health_identity_visible_log_footprint',
+                  'abort_receipt': status == 'NONPASS', 'services_changed': False})
+    return 1 if status == 'NONPASS' else 0
 
 
 def main():

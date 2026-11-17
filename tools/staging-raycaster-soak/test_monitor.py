@@ -1,5 +1,9 @@
 """Harmless host tests. No Docker, native server, DB or network execution."""
 import copy
+import os
+import gzip
+import shutil
+import subprocess
 from contextlib import ExitStack
 from types import SimpleNamespace
 import importlib.util
@@ -32,10 +36,16 @@ def snapshot():
             'containers': {n: dict(id='id', image='image', pid=1, started='start',
                                   restarts=0, init_process={'identity': [1, 2, 3]}, memory_max='1000', cpu_max='100000 100000',
                                   memory_events={'oom': 0}, cpu={'usage_usec': 0}, cpu_read_window=[0, 0])
-                           for n in m.CONTAINERS}, 'logs': [{'offset': 0}]}
+                           for n in m.CONTAINERS}, 'logs': [{'offset': 0}], 'log_footprint': {'baseline_bytes':0,'current_bytes':0,'high_water_bytes':0,'increase_bytes':0}}
 
 
 class TestMonitor(unittest.TestCase):
+    def setUp(self):
+        self.previous_umask=os.umask(0o077)
+
+    def tearDown(self):
+        os.umask(self.previous_umask)
+
     def test_manifest_rejects_missing_unbounded_nonfinite(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)/'m.json'
@@ -78,7 +88,7 @@ class TestMonitor(unittest.TestCase):
             with self.assertRaisesRegex(m.Nonpass, 'nonfinite'):
                 m.log_sample(p, b)
             p.write_bytes(b'')
-            with self.assertRaisesRegex(m.Nonpass, 'truncated'):
+            with self.assertRaisesRegex(m.Nonpass, 'truncation'):
                 m.log_sample(p, b)
             b = m.log_sample(p, None)
             p.write_bytes(b'x'*(m.CAP+1))
@@ -99,7 +109,7 @@ class TestMonitor(unittest.TestCase):
                      lambda s: s['containers'][m.CONTAINERS[0]].update(pid=2),
                      lambda s: s['containers'][m.CONTAINERS[0]]['memory_events'].update(oom=1),
                      lambda s: s['containers'][m.CONTAINERS[0]]['cpu'].update(usage_usec=301000000),
-                     lambda s: s['logs'][0].update(offset=1001)]
+                     lambda s: s['log_footprint'].update(increase_bytes=1001)]
         for mutate in mutations:
             s = copy.deepcopy(good)
             mutate(s)
@@ -179,7 +189,7 @@ class TestMonitor(unittest.TestCase):
                     return dict(identity=[pid, 1], kind='world' if pid == 101 else 'zone',
                                 sha256='b'*64 if fault == 'hash' else 'a'*64,
                                 rss_bytes=1001 if fault == 'rss' else 100, cpu_ticks=1)
-                for name, replacement in [('command', command), ('read', read),
+                for name, replacement in [('verify_policy', lambda:m.POLICY_SHA), ('command', command), ('read', read),
                                           ('process', process), ('digest', lambda p: 'a'*64),
                                           ('counters', lambda p: {'usage_usec': 0} if str(p).endswith('cpu.stat') else {'oom': 0})]:
                     stack.enter_context(patch.object(m, name, replacement))
@@ -192,6 +202,12 @@ class TestMonitor(unittest.TestCase):
                     obs.sample(result)
                     self.assertNotIn('private', m.encode(result).decode())
                     self.assertTrue(result['health']['ready'])
+                    shutil.copyfile(log,Path(str(log)+'.1'));log.write_bytes(b'after rotation\n')
+                    next_result={};obs.sample(next_result)
+                    self.assertTrue(obs.log_gap);self.assertTrue(next_result['health']['ready'])
+                    self.assertEqual(next_result['log_footprint']['baseline_bytes'],len('old private console content'))
+                    self.assertEqual(next_result['log_footprint']['current_bytes'],len('old private console contentafter rotation\n'))
+                    self.assertEqual(next_result['log_coverage'],'GAP_POSSIBLE')
                     self.assertEqual(len(result['processes']), 2)
                     self.assertTrue(all(a[1] in ('inspect', 'top', 'exec') for a in commands if a[0] == 'docker'))
                     inspect = next(a for a in commands if a[0] == 'docker' and a[1] == 'inspect')
@@ -272,6 +288,119 @@ class TestMonitor(unittest.TestCase):
             os.mkfifo(p)
             with self.assertRaisesRegex(m.Nonpass, 'not_regular'):
                 m.log_sample(p, None)
+
+
+class TestRotationContract(unittest.TestCase):
+    def setUp(self):
+        self.previous_umask=os.umask(0o077)
+
+    def tearDown(self):
+        os.umask(self.previous_umask)
+
+    def rotate(self,p):
+        for n in range(7,2,-1):
+            src=Path(str(p)+'.'+str(n-1)+'.gz');dest=Path(str(p)+'.'+str(n)+'.gz')
+            if src.exists():src.replace(dest)
+        old=Path(str(p)+'.1')
+        if old.exists():
+            Path(str(p)+'.2.gz').write_bytes(gzip.compress(old.read_bytes()));old.unlink()
+        shutil.copyfile(p,old)
+        p.write_bytes(b'')
+
+    def test_actual_copytruncate_old_red_new_gap_and_visible_footprint(self):
+        old_source=subprocess.check_output(['git','show','3a14b6cecb04c9baed4f047cabd271d75ce2f151:tools/staging-raycaster-soak/monitor.py'],cwd=HERE,text=True)
+        namespace={'__name__':'old_fixture'};exec(compile(old_source,'retained_old_monitor','exec'),namespace)
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'native.log';p.write_bytes(b'baseline\n')
+            old=namespace['log_sample'](p,None);current=m.log_sample(p,None)
+            self.rotate(p);p.write_bytes(b'new\n')
+            with self.assertRaisesRegex(namespace['Nonpass'],'truncated'):namespace['log_sample'](p,old)
+            current=m.log_sample(p,current)
+            self.assertTrue(current['coverage_gap']);self.assertEqual(current['rotation']['content_coverage'],'GAP_POSSIBLE')
+            self.assertEqual(current['visible_footprint_bytes'],len(b'baseline\nnew\n'))
+            with p.open('ab') as f:f.write(b'later\n')
+            current=m.log_sample(p,current);self.assertTrue(current['coverage_gap']);self.assertIsNone(current['rotation'])
+            self.rotate(p);current=m.log_sample(p,current)
+            self.assertTrue(current['coverage_gap']);self.assertIn('.2.gz',current['archives'])
+
+    def test_expected_transition_does_not_hide_observed_bad_or_split_tokens(self):
+        for where in ('archive','current','split'):
+            with self.subTest(where=where),tempfile.TemporaryDirectory() as d:
+                p=Path(d)/'native.log';p.write_bytes(b'base\n');old=m.log_sample(p,None)
+                if where=='archive':
+                    with p.open('ab') as f:f.write(b'panic\n')
+                self.rotate(p)
+                p.write_bytes(b'pa' if where=='split' else b'panic\n' if where=='current' else b'')
+                if where=='split':
+                    old=m.log_sample(p,old)
+                    with p.open('ab') as f:f.write(b'nic\n')
+                with self.assertRaisesRegex(m.Nonpass,'nonfinite'):m.log_sample(p,old)
+
+    def test_missing_unexpected_malformed_unsafe_and_budget_refuse(self):
+        for fault in ('missing_archive','replacement','wrong_prefix','unknown_suffix','symlink','writable','malformed_gzip','gzip_bomb','rewritten_prefix'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as d:
+                p=Path(d)/'native.log';p.write_bytes(b'base\n');old=m.log_sample(p,None)
+                if fault=='missing_archive':p.write_bytes(b'')
+                elif fault=='replacement':p.rename(Path(d)/'elsewhere');p.write_bytes(b'base\n')
+                elif fault=='rewritten_prefix':p.write_bytes(b'BASE\nmore')
+                elif fault=='unknown_suffix':Path(str(p)+'.8.gz').write_bytes(b'x')
+                elif fault=='symlink':Path(str(p)+'.1').symlink_to(p)
+                elif fault=='writable':p.chmod(0o666)
+                else:
+                    self.rotate(p)
+                    if fault=='wrong_prefix':Path(str(p)+'.1').write_bytes(b'WRONG\n')
+                    elif fault=='malformed_gzip':Path(str(p)+'.2.gz').write_bytes(b'not gzip')
+                    else:Path(str(p)+'.2.gz').write_bytes(gzip.compress(b'x'*(m.CAP+1)))
+                with self.assertRaises((m.Nonpass,OSError,EOFError)):m.log_sample(p,old)
+        with tempfile.TemporaryDirectory() as d:
+            a=Path(d)/'a';z=Path(d)/'z';a.write_bytes(b'xx');z.write_bytes(b'xx');budget=[3]
+            m.log_sample(a,None,budget)
+            with self.assertRaisesRegex(m.Nonpass,'backlog'):m.log_sample(z,None,budget)
+
+    def test_unstable_read_fails_closed(self):
+        import os
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'log';p.write_bytes(b'data');real=os.fstat;calls=[0]
+            def changed(fd):
+                st=real(fd);calls[0]+=1
+                if calls[0]==2:
+                    return SimpleNamespace(st_dev=st.st_dev,st_ino=st.st_ino,st_size=st.st_size+1,st_mtime_ns=st.st_mtime_ns,st_ctime_ns=st.st_ctime_ns)
+                return st
+            with patch.object(m.os,'fstat',side_effect=changed),self.assertRaisesRegex(m.Nonpass,'unstable'):m.log_sample(p,None)
+
+    def test_gap_does_not_join_separate_content_epochs(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'log';p.write_bytes(b'base\n');old=m.log_sample(p,None)
+            with p.open('ab') as f:f.write(b'pa')
+            old=m.log_sample(p,old);self.rotate(p);p.write_bytes(b'nic\n')
+            new=m.log_sample(p,old);self.assertTrue(new['coverage_gap'])
+            self.assertEqual(new['_tail'],b'nic\n')
+
+    def test_policy_change_and_unsafe_manifest_fail_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'policy';p.write_bytes(b'changed')
+            with patch.object(m,'POLICY_PATH',str(p)),self.assertRaises(m.Nonpass):m.verify_policy()
+            c=manifest();c['log_observation']['growth_metric']='generated-bytes'
+            p.write_text(json.dumps(c))
+            with self.assertRaisesRegex(m.Nonpass,'log_contract'):m.config(p)
+            c=manifest();c['logs']=['/wrong/native.log'];p.write_text(json.dumps(c))
+            with self.assertRaisesRegex(m.Nonpass,'fixed_log'):m.config(p)
+
+    def test_completed_gap_is_scoped_not_plain_pass_and_no_end_eligibility(self):
+        with tempfile.TemporaryDirectory() as d:
+            now=[0.]
+            class Fake:
+                log_gap=True
+                def sample(self,result):result['log_coverage']='GAP_POSSIBLE'
+            def sleep(seconds):now[0]+=seconds
+            out=m.Artifacts(Path(d)/'run')
+            with patch.object(signal,'setitimer'),patch.object(signal,'alarm'):
+                self.assertEqual(m.run(manifest(),out,Fake(),lambda:now[0],sleep),0)
+            summary=json.loads((out.root/'summary.json').read_text())
+            self.assertEqual(summary['status'],'PASS_WITH_LOG_COVERAGE_GAP')
+            self.assertEqual(summary['resource_health_status'],'PASS')
+            self.assertEqual(summary['logcoverage'],'GAP_POSSIBLE');self.assertEqual(summary['log_continuity'],'UNPROVEN')
+            self.assertFalse(summary['end_probe_eligible']);self.assertFalse(summary['abort_receipt'])
 
 
 if __name__ == '__main__':

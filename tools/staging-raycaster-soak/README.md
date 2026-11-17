@@ -21,7 +21,7 @@ output is drained under a cap and discarded, never stored or printed.
 Copy `manifest.example.json` to a private reviewed manifest. Null limits and the
 placeholder health SHA intentionally fail validation. Supply the exact deployed
 release, production source commit, backend, world and zone SHA256, health-script
-absolute path/hash, expected zone count, actual log paths and filesystem paths.
+absolute path/hash, expected zone count, the fixed four native log paths, explicit log-observation contract and filesystem paths.
 The example pins the supplied matched ON binaries from source
 `1bcb08a994568fef84516f94614e463703eca574`. It does not attest the live deployment.
 The backend and release are parent attestations. Executed world/zone hashes are
@@ -33,12 +33,15 @@ Before use, parent must predeclare limits from its live baseline receipt:
   Known allocation is server 6 GiB/2 CPU and DB 2 GiB/1 CPU. Allocation is not a
   safe abort threshold. Select headroom from observed usage, below allocation.
 - Maximum per-process RSS, minimum host MemAvailable, minimum filesystem free
-  bytes and maximum aggregate log growth from the initial offset.
-- All native and Docker JSON log files to cover, including DB logs if needed.
-  Paths are host-visible regular files. Parent must inventory coverage; the
-  helper cannot prove an omitted log is quiet. Include output/log/data filesystems
-  in `disk_paths`. Read access to host `/proc`, cgroup v2, Docker socket and logs
-  is required. Unsupported cgroups or unreadable files fail closed.
+  bytes and maximum increase in visible on-disk log-family footprint high-water from the initial footprint.
+- Exactly the four `logs` in the example, mapped by the verified host
+  `/etc/logrotate.d/eqemu-staging` policy, SHA256
+  `908247ab7494a776b017c23caa121c02a95ffba61fb5cb94164bb95501198478`.
+  The policy is verified each sample. Docker/DB journals and other native logs
+  are excluded; no quietness claim is made for them. Include the log/data/output
+  filesystems in `disk_paths`. Unsupported cgroups, unreadable inputs and policy
+  changes fail closed. Old manifests lack the new semantics and are refused.
+
 
 Exact invocation, after replacing deployment paths:
 
@@ -60,14 +63,44 @@ filesystem free space. Each CPU counter has a monotonic read window; interval ch
 possible interval between successive windows, conservatively covering collection
 time. CPU averages do not detect every short spike.
 
-New log bytes only are scanned, at most 1 MiB per file per sample, with a private
-256-byte overlap for split fault words. No native lines or health output are
-exported. Fault/nonfinite/query-failure patterns are conservative; a match stops
-the run. This is a finite fault scanner, not a collision-query parser or complete
-native error vocabulary. Parent's initial/final checks and private probe receipts
-remain separate. Existing log content is skipped by an immutable initial offset.
-A rotated/truncated log, scan backlog or short read fails instead of silently
-skipping evidence. Aggregate log-growth limits cover only the declared files.
+### Rotation, observed content and visible footprint
+
+The selected future contract is `copytruncate-visible-footprint-v1`. It is a
+new contract, never a reinterpretation of the stopped 13h15m/159-sample run.
+There are exactly four active paths. Only `.1`, `.2.gz` through `.7.gz` belong
+to each policy family. A bounded directory-name check, at most 4096 entries,
+rejects unexpected suffixes instead of discovering more logs. Every accepted
+file must be regular, single-link, nonsymlink, owned1000:1000 and not group/world
+writable. Before/after read identity/size/timestamps must be stable. Missing active
+files, archive-generation holes, malformed gzip, unexpected replacements or
+unverifiable transitions fail closed.
+
+Normal append scans only observed new bytes, with a private256-byte tail for
+split BAD words. A same-inode shrink or changed archive inventory requires a new
+`.1`, matching prior offset anchor and the expected archive content-generation
+shift. The helper validates compressed archive data/CRC with bounded expansion;
+compressed bytes, expanded bytes, active reads and anchors share **one1MiB
+budget per complete sample across all four families**, not a new cap per archive.
+Backlog, malformed/oversized input, read races or exhaustion fail NONPASS.
+Preexisting content is not reclassified as newly generated errors.
+
+A policy-consistent copytruncate is an explicit event recording the observation
+window, old offset, available archive bytes and exact observed spans/counts/hashes.
+Visible unread archive-tail and new active-prefix bytes are scanned for the
+unchanged BAD/nonfinite/query-failure patterns. Separate unproved epochs are not
+joined. `GAP_POSSIBLE` becomes sticky from the first accepted rotation and can
+never clear. No missing-byte, recovered-byte, uninterrupted-content or absence-of-
+errors claim is made for the unobserved gap. This is a finite scanner, not log
+reconstruction or a complete native error vocabulary.
+
+`log_growth_bytes` now means **increase in the high-water of visible on-disk
+footprint**, summed over the four active files and finite policy archives,
+relative to the initial footprint. Each sample records baseline/current/high-water
+and increase. Archive file sizes are physical compressed sizes where applicable.
+Compression/deletion may hide generated volume; this metric is NOT cumulative
+bytes generated. Rotation never resets the high-water. The selected future limit
+remains256MiB, with the separate20GiB free-disk guard unchanged. No public policy
+or logging change is made by the observer.
 
 ## Output and abort semantics
 
@@ -79,16 +112,24 @@ the terminal receipt. Private directory mode is 0700 and files are 0600, then
 `summary.json` is an exclusive terminal receipt published only after private
 write, permission, fsync and readback checks. Directory-sync failure removes the
 new publication and returns artifact failure. Consumers still require process
-exit0 with PASS; missing receipts are incomplete. An initial failed sample has no
+exit0 and the explicit scoped summary; missing receipts are incomplete. An initial failed sample has no
 complete baseline, only partial evidence. Successful prior samples stay intact.
 
 Nonfinite/invalid data, command failure/timeout, unhealthy containers, any observed
 restart history, PID/executable identity change, OOM history, increased memory
 events, exceeded resource/disk/log limits, signal interruption, artifact exhaustion
 or observer exception returns NONPASS and stops monitoring. Exit 1 means recorded
-NONPASS; exit 2 means setup/artifact failure. PASS/exit 0 means only that the
-observation deadline completed with every scheduled sample successful. It does
-not establish collision correctness, graceful shutdown or rollback success.
+NONPASS; exit 2 means setup/artifact failure. A completed run records `resource_health_status=PASS`, the footprint metric and
+last complete footprint, and separate log coverage. If any rotation gap occurred,
+status is **PASS_WITH_LOG_COVERAGE_GAP**, never plain PASS. Without an observed
+rotation it is PASS, still scoped to sampled resource/health/identity/visible
+footprint. `log_continuity=UNPROVEN` and `content_claim=observed_bytes_only` remain
+explicit. Both completed resource outcomes return0; observer/fatal guard failure
+returns1/NONPASS, with `resource_health_status=NONPASS`. Any observed BAD pattern
+remains fatal. A coverage-gap outcome is not whole-runtime success or proof of
+no native errors. `end_probe_eligible=false` prevents reuse as an automatic old
+PASS gate; a separate explicit scoped root selection is required for future end
+probes. No outcome establishes collision correctness, graceful shutdown or rollback.
 
 Safe stop for the example unit:
 
@@ -113,7 +154,13 @@ python3 -B -m unittest discover -s tools/staging-raycaster-soak -v
 python3 -B -c 'import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path("tools/staging-raycaster-soak").glob("*.py")]'
 ```
 
-## Read-only private-probe assessment, 2026-11-15
+## Historical private-probe assessment, 2026-11-15
+
+The following is the original dated assessment, before the separate reviewed
+PR39 private fixture and initial Q2/PoK qualification. It is retained as history,
+not a current probe blocker. Source-only changes here do not change PR39 or
+qualify another runtime. The initial native PASS and failed 24h attempt remain
+separate retained evidence.
 
 Source inspected in the supplied Server worktree, without executing it:
 `tests/server_collision_ab/{README.md,run.py,scenario.py,route.json,pok-route.json}`,

@@ -1,0 +1,12 @@
+#!/usr/bin/python3 -IB
+"""Run the headless Qeynos2 journey against a Rust server build.
+
+See validation/journey/README.md.
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "validation" / "journey"))
+import host  # noqa: E402
+
+sys.exit(host.main())

@@ -104,3 +104,11 @@ Optional unsanitized profiling is documented in `validation/worker/PROFILING.md`
 Never combine `--profile asan-ubsan-native-v1` with `--profiling` or profiler
 inputs. The combined source has a new exact helper identity; old admitted
 packages remain historical identities and do not qualify this checkout.
+
+# Headless Qeynos2 journey
+
+`scripts/qeynos2-journey run --server BIN --client BIN --maps DIR` runs the
+Rust server's Qeynos2 journey with headless EQOxide in a per-command rootless
+Docker daemon and writes `result.json` naming the first failed milestone. See
+`validation/journey/README.md`. Routine runs neither seal nor run the native
+comparison. Run artifacts stay under `~/.local/state/eqemu-rust-journey/`.
